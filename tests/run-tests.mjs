@@ -5,7 +5,8 @@
  * 运行：node tests/run-tests.mjs
  */
 import { auditText, detectDocumentProfile, filterReport, hitFingerprint, diffAudit, serializeFingerprints, deserializeFingerprints, diffScholarship, computeStyleProfile, computeJournalProfile, computeJournalProfileFromDocuments, auditJournalFit, detectRhetoricalMoves, splitSentences, cosineSimilarity, tokenizeForSimilarity, extractEpistemicMarkers, diffEpistemic, alignSentences, formatReport, extractClaimSpans, simTier, analyzeParagraphRhythm, analyzeSentenceRhythm, scaffoldSignature, findRepeatedScaffolds, findPunctuationOverloads, findCoinedFrameworks, findGenericClaims, parseBibText, checkCitationIntegrity } from '../lib/rules.js'
-import { isPaperFile, baselineByteSize, pruneBaselines, buildAutoAuditControl } from '../lib/index.js'
+import { isPaperFile, baselineByteSize, pruneBaselines, buildAutoAuditControl, attachContext } from '../lib/index.js'
+import { targetPathOf, resolveTarget, getSessionCwd, writeOutcome, checkWriteAllowed, executionKey } from '../lib/host-adapter.js'
 import fs from 'node:fs'
 import path from 'node:path'
 
@@ -1666,7 +1667,7 @@ console.log('=== 89. v1.4 Journal Profile 蒸馏（computeJournalProfile）===')
     'Our findings suggest that temperature is a key control. The observed increase may be related to enhanced vapor transport. Further studies should examine pore-scale salt precipitation.',
   ].join('\n')
   const profile = computeJournalProfile(corpus, { journal: 'Test Journal', articleType: 'research-article' })
-  check('journal profile metadata', profile.metadata.journal === 'Test Journal' && profile.metadata.profileVersion === '2.0.2' && profile.structure.sections.length >= 4)
+  check('journal profile metadata', profile.metadata.journal === 'Test Journal' && profile.metadata.profileVersion === '2.2.0' && profile.structure.sections.length >= 4)
   check('journal profile has sentence distribution', !!profile.sentenceStyle.sentenceLength && profile.sentenceStyle.sentenceLength.count > 0)
   check('journal profile has section details', profile.structure.sections.some((s) => s.name === 'results' && s.sentenceLength.count > 0))
   check('journal profile preserves only statistics', !JSON.stringify(profile).includes('This study investigates'))
@@ -2509,6 +2510,82 @@ console.log('=== 100. v2.0 Argument Economy / Control Plane ===')
   check('v2 control block carries structured edit action', control.includes('action=REFRAME_TO_FACT'))
 }
 
+console.log('')
+console.log('=== 13. 宿主适配层（host-adapter，rc.2 边界） ===')
+
+{
+  // 目标识别：官方 write/edit 用 file_path，dsh-ops 的 ops_* 用 path
+  check('adapter: write file_path', targetPathOf({ name: 'write', arguments: { file_path: 'a.md' } }) === 'a.md')
+  check('adapter: edit file_path', targetPathOf({ name: 'edit', arguments: { file_path: 'b.md' } }) === 'b.md')
+  check('adapter: write filePath alias', targetPathOf({ name: 'write', arguments: { filePath: 'c.md' } }) === 'c.md')
+  check('adapter: ops_write_file path', targetPathOf({ name: 'ops_write_file', arguments: { path: 'd.md' } }) === 'd.md')
+  check('adapter: ops_edit_file path', targetPathOf({ name: 'ops_edit_file', arguments: { path: 'e.md' } }) === 'e.md')
+  check('adapter: ops_replace path', targetPathOf({ name: 'ops_replace', arguments: { path: 'f.md' } }) === 'f.md')
+  check('adapter: ops_replace pattern is not a target', targetPathOf({ name: 'ops_replace', arguments: { pattern: 'x', path: 'g.md' } }) === 'g.md')
+  check('adapter: non-write tool ignored', targetPathOf({ name: 'writing_audit', arguments: { filePath: 'h.md' } }) === null)
+  check('adapter: missing args ignored', targetPathOf({ name: 'write', arguments: {} }) === null)
+  check('adapter: null exec ignored', targetPathOf(null) === null)
+
+  // 相对路径必须按会话 cwd 解析，而不是宿主进程 cwd
+  const abs = path.resolve('/tmp/wg-root')
+  check('adapter: absolute path normalized', resolveTarget('a/../b.md', abs) === path.normalize(path.join(abs, 'b.md')))
+  check('adapter: relative path uses cwd', resolveTarget('paper.md', abs) === path.join(abs, 'paper.md'))
+  check('adapter: absolute target ignores cwd', resolveTarget(path.join(abs, 'x.md'), '/elsewhere') === path.normalize(path.join(abs, 'x.md')))
+
+  // 会话 cwd 软取：优先 workingDirectory 服务，回退 header.cwd
+  const session = { header: { cwd: '/from/header' } }
+  check('adapter: cwd from workingDirectory service', getSessionCwd({ get: () => ({ get: () => '/from/service' }) }, session) === '/from/service')
+  check('adapter: cwd falls back to header', getSessionCwd({ get: () => undefined }, session) === '/from/header')
+  check('adapter: cwd tolerates throwing service', getSessionCwd({ get: () => { throw new Error('inactive') } }, session) === '/from/header')
+  check('adapter: cwd undefined without session', getSessionCwd(undefined, undefined) === undefined)
+
+  // 写入结果分层：dryRun / error / rejected / block 都不能当成已落地
+  check('adapter: plain success is applied', writeOutcome({ isError: false, value: { path: 'a.md' } }) === 'applied')
+  check('adapter: isError is failed', writeOutcome({ isError: true, error: { message: 'x' } }) === 'failed')
+  check('adapter: dryRun is dry-run', writeOutcome({ isError: false, value: { status: 'completed', dryRun: true } }) === 'dry-run')
+  check('adapter: planned status is dry-run', writeOutcome({ isError: false, value: { status: 'planned' } }) === 'dry-run')
+  check('adapter: rejected status is failed', writeOutcome({ isError: false, value: { status: 'rejected' } }) === 'failed')
+  check('adapter: error status is failed', writeOutcome({ isError: false, value: { status: 'error' } }) === 'failed')
+  check('adapter: error payload is failed', writeOutcome({ isError: false, value: { error: { code: 'X' } } }) === 'failed')
+  check('adapter: completed status is applied', writeOutcome({ isError: false, value: { status: 'completed' } }) === 'applied')
+  check('adapter: unknown result is unknown', writeOutcome(undefined) === 'unknown')
+
+  // 沙箱政策边界（软取失败时保持旧行为）
+  check('adapter: no policy allows', checkWriteAllowed(undefined, '/any/where.md') === null)
+  check('adapter: danger-full-access allows', checkWriteAllowed({ mode: 'danger-full-access' }, '/any/where.md') === null)
+  check('adapter: read-only denies', typeof checkWriteAllowed({ mode: 'read-only' }, '/w/a.md') === 'string')
+  check('adapter: workspace-write allows inside root', checkWriteAllowed({ mode: 'workspace-write', workspaceRoot: '/w' }, '/w/a.md') === null)
+  check('adapter: workspace-write denies outside root', typeof checkWriteAllowed({ mode: 'workspace-write', workspaceRoot: '/w' }, '/other/a.md') === 'string')
+  check('adapter: workspace-write denies traversal escape', typeof checkWriteAllowed({ mode: 'workspace-write', workspaceRoot: '/w' }, '/w/../other/a.md') === 'string')
+
+  // 执行键：token 是 branded symbol，所有 token 的 String() 相同，必须按身份区分
+  const tokenA = Symbol('dsh.tool.execution')
+  const tokenB = Symbol('dsh.tool.execution')
+  const keyA = executionKey({ token: tokenA, name: 'write', arguments: { file_path: 'a.md' } })
+  const keyA2 = executionKey({ token: tokenA, name: 'write', arguments: { file_path: 'a.md' } })
+  const keyB = executionKey({ token: tokenB, name: 'write', arguments: { file_path: 'a.md' } })
+  check('adapter: same token yields stable key', keyA === keyA2)
+  check('adapter: distinct tokens do not collide', keyA !== keyB)
+  check('adapter: callId fallback', executionKey({ callId: 'call-1' }) === 'call:call-1')
+  check('adapter: target fallback', executionKey({ name: 'write', arguments: { file_path: 'a.md' } }) === 'path:a.md')
+
+  // v2.2 通知挂载：必须走 decision.additionalContexts。
+  // rc.2 宿主在 dispatchScheduledExecution 里就合并完 deferContext 队列
+  // （dsh-tools/lib/index.js:3429-3435），而那一步在 postExecute（:3464）之前；
+  // 在 tools/post-execute 里调用 exec.deferContext 会被静默丢弃。
+  const notice = { role: 'user', content: [{ type: 'text', text: 'notice' }] }
+  let deferCalls = 0
+  const fakeExec = { deferContext: () => { deferCalls += 1 } }
+  const accepted = attachContext(fakeExec, { kind: 'accept' }, notice)
+  check('adapter: attachContext returns additionalContexts on decision', Array.isArray(accepted.additionalContexts) && accepted.additionalContexts.length === 1)
+  check('adapter: attachContext keeps decision kind', accepted.kind === 'accept')
+  check('adapter: attachContext does not rely on exec.deferContext', deferCalls === 0)
+  const blocked = attachContext(fakeExec, { kind: 'block', feedback: [{ type: 'text', text: 'no' }] }, notice)
+  check('adapter: attachContext works on block decision', blocked.kind === 'block' && blocked.additionalContexts.length === 1)
+  const prior = attachContext(undefined, { kind: 'accept', additionalContexts: [{ role: 'user', content: [] }] }, notice)
+  check('adapter: attachContext preserves existing contexts', prior.additionalContexts.length === 2)
+  check('adapter: attachContext tolerates missing exec', attachContext(undefined, { kind: 'accept' }, notice).additionalContexts.length === 1)
+}
 console.log('')
 console.log(`结果：${pass} 通过 / ${fail} 失败`)
 if (fail > 0) {

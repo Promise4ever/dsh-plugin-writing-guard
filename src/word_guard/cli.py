@@ -592,6 +592,42 @@ def writing_word_equation_audit(file_path, baseline_path=None):
     return audit_equations(file_path, baseline_path)
 
 
+def writing_word_extract(file_path):
+    """
+    Extract paragraph text from a DOCX as structured JSON.
+
+    Reuses the same python-docx extraction as writing_word_audit: paragraphs in
+    document order, keeping only those whose stripped text is non-empty.
+
+    Args:
+        file_path: path to the .docx file
+
+    Returns:
+        dict with the absolute file path, the paragraph records and the full
+        text (paragraphs joined by newlines)
+    """
+    if not os.path.exists(file_path):
+        return {'error': f"File not found: {file_path}"}
+
+    from docx import Document
+    doc = Document(file_path)
+
+    paragraphs = []
+    for i, para in enumerate(doc.paragraphs):
+        if para.text.strip():
+            paragraphs.append({
+                'index': i,
+                'text': para.text,
+                'style': para.style.style_id if para.style else None,
+            })
+
+    return {
+        'file': os.path.abspath(file_path),
+        'paragraphs': paragraphs,
+        'text': '\n'.join(p['text'] for p in paragraphs),
+    }
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # CLI Interface
 # ═══════════════════════════════════════════════════════════════════════════
@@ -604,6 +640,7 @@ def main():
         print("Commands:")
         print("  scan <file.docx>                          - Structural scan")
         print("  audit <file.docx>                         - Writing audit")
+        print("  extract <file.docx>                       - Extract paragraph text as JSON")
         print("  edit <file.docx> <replacements.json>      - Edit document")
         print("  scope-check <before.docx> <after.docx>    - Check scope integrity")
         print("  format-tables <file.docx> [output.docx] [baseline.docx] - Three-line tables + centered cells")
@@ -630,6 +667,22 @@ def main():
             sys.exit(1)
         result = writing_word_audit(sys.argv[2])
         print(json.dumps(result, indent=2, ensure_ascii=False))
+
+    elif command == 'extract':
+        if len(sys.argv) < 3:
+            print("Usage: extract <file.docx>")
+            sys.exit(1)
+        # Emit UTF-8 JSON regardless of the console code page. The host reads
+        # this stdout as UTF-8; without this, CJK text would be encoded with the
+        # Windows locale codec (cp936/cp1252) and arrive mojibaked.
+        try:
+            sys.stdout.reconfigure(encoding='utf-8')
+        except Exception:
+            pass
+        result = writing_word_extract(sys.argv[2])
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        if result.get('error'):
+            sys.exit(2)
 
     elif command == 'edit':
         if len(sys.argv) < 4:

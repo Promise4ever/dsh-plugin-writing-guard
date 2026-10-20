@@ -1,7 +1,17 @@
 # DSH Writing Guard
 
-[![Awesome DSH Plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com)
-[![CI](https://github.com/xmutfyh/dsh-plugin-writing-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/xmutfyh/dsh-plugin-writing-guard/actions/workflows/ci.yml)
+[![Fork](https://img.shields.io/badge/fork-Promise4ever%2Fdsh--plugin--writing-guard-blue)](https://github.com/Promise4ever/dsh-plugin-writing-guard)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+> **This is a fork, not upstream.** Upstream: [xmutfyh/dsh-plugin-writing-guard](https://github.com/xmutfyh/dsh-plugin-writing-guard).
+> The npm package named `dsh-plugin-writing-guard` is the **upstream** build, not this adapted fork —
+> this fork publishes no npm package and has no CI of its own.
+>
+> This fork adapts upstream 2.0.2 to **DSH 0.2.1-rc.2** (version 2.2.0, tag `v2.2.0`) and has been
+> **tested only on DSH 0.2.1-rc.2**; other versions are unverified. Changes vs upstream: host adaptation
+> (rc.2 peer ranges, message-source kind, tool-result protocol, Word Python paths), the regression fix for
+> control notices being silently dropped on rc.2, and corrected docs/install instructions.
+> Rules, rule corpus and test suite come from upstream — see [Credits](#credits) and [License](#license).
 
 **Less explanation. More argument. Preserve the science.**
 
@@ -58,11 +68,18 @@ Prefer: Normalization parameters were estimated from the training data.
 ## Quick Start
 
 ```sh
-dsh plugin --profile web add dsh-plugin-writing-guard
+# 1) Get the plugin as a DIRECTORY (see Full install below for both routes)
+
+# 2) Install that directory (absolute path, the folder that holds package.json)
+dsh plugin --profile <profile> add "file:D:/path/to/dsh-plugin-writing-guard"
+
+# 3) Restart the host so the patch layer loads
 dsh web
 ```
 
-Published on npm. GitHub / local source installs are also supported — see [full install instructions](#full-install).
+This fork is **not published on npm**. `dsh plugin add dsh-plugin-writing-guard` resolves to the
+upstream package, which does not contain the rc.2 adaptation. Use the git tag / release ZIP instead —
+see [Full install](#full-install).
 
 ---
 
@@ -158,32 +175,79 @@ The same sentence can mean different things in different document types:
 
 ## Automatic / incremental audit
 
-The plugin listens to `tools/post-execute`: when the agent writes/edits paper files (`.md` / `.tex` / `.txt`), it automatically audits and injects results into the next model request.
+The plugin listens to `tools/post-execute`: when the agent writes/edits paper files (`.md` / `.markdown` / `.tex` / `.txt` / `.docx`), it automatically audits and injects results into the next model request.
 
 - Audit state is persisted per file; only **incremental** changes are injected (new / resolved / still present)
 - No repeated injection when nothing changed
 - Before/after text is captured automatically, so Scholarship Lock + Epistemic Lock run without manually passing `original`
+- The notice is attached through `decision.additionalContexts`. When the host blocks the call the plugin attaches no notice — and a block does **not** undo anything: the file was already written to disk
+- `.docx` targets are read through the Python bridge, so they need `python-docx` exactly like the Word tools
+- The auto-audit is context injection, not a sandbox — see [Security & Privacy](#security--privacy)
 
 ## Full install
 
+**Only one form survives long-term: install the plugin as a directory (`file:<absolute directory>`).**
+
+### Route A — git clone + checkout the tag
+
 ```sh
-# From npm (published — recommended)
-dsh plugin --profile web add dsh-plugin-writing-guard
+git clone https://github.com/Promise4ever/dsh-plugin-writing-guard.git
+cd dsh-plugin-writing-guard
+git checkout v2.2.0
 
-# From GitHub (lib/ is committed — no build needed)
-dsh plugin --profile web add github:xmutfyh/dsh-plugin-writing-guard
-
-# Or from the GitHub tarball
-dsh plugin --profile web add https://github.com/xmutfyh/dsh-plugin-writing-guard/archive/refs/heads/master.tar.gz
-
-# Or from a local source directory
-dsh plugin --profile web add ./path/to/dsh-plugin-writing-guard
-
-# Restart to apply
+dsh plugin --profile <profile> add "file:D:/path/to/dsh-plugin-writing-guard"
 dsh web
 ```
 
-Repository: https://github.com/xmutfyh/dsh-plugin-writing-guard
+The cloned folder *is* the plugin directory (it contains `package.json`). **Do not move or delete it
+afterwards** — the `file:` dependency points at it.
+
+### Route B — release ZIP unpacked to a permanent directory
+
+Download the v2.2.0 ZIP from
+[Releases](https://github.com/Promise4ever/dsh-plugin-writing-guard/releases/tag/v2.2.0), unpack it to a
+stable directory (e.g. `D:/plugins/dsh-plugin-writing-guard`), then install that directory:
+
+```sh
+dsh plugin --profile <profile> add "file:D:/plugins/dsh-plugin-writing-guard"
+dsh web
+```
+
+### If you hit `ERR_PNPM_IGNORED_BUILDS`
+
+pnpm blocks dependency build scripts by default; this plugin's `postinstall` installs the skill and copies
+the Python resources. Copy **the exact key pnpm printed** (usually `dsh-plugin-writing-guard`) into the
+profile's `pnpm-workspace.yaml`:
+
+```yaml
+allowBuilds:
+  dsh-plugin-writing-guard: true
+```
+
+Then re-run the same `dsh plugin ... add` command. Do not invent the key name.
+
+### ⚠️ Do not install a local `.tgz`
+
+`dsh plugin add <some-pot>.tgz` installs fine, but on **DSH Desktop builds that run the orphan-plugin
+cleanup at startup**, a `file:`/`link:` dependency whose target is not a directory is treated as dangling
+and silently uninstalled (the test is `is_dir()`; a tarball is a file, so it always fails). Symptom:
+it works after install and is gone from the plugin list after a restart.
+
+- Scope: **local `file:*.tgz` installs on those Desktop builds**.
+- Directory installs (`file:<directory>`) are not affected — that is why both routes above use a directory.
+- Registry installs, HTTPS-tarball installs and plain CLI profiles are **not proven** to be broken by this;
+  do not generalise the warning.
+
+### Prerequisites
+
+- **DSH 0.2.1-rc.2** (peers: `@deepseek-ai/dsh-tools` / `@deepseek-ai/dsh-llm` `^0.2.1-rc.2`,
+  `@deepseek-ai/cordis` `^4.0.1`). This fork is verified **only** on 0.2.1-rc.2.
+- Node.js ≥ 22.19.0 (DSH 0.2.1 runtime requirement).
+- Python 3.10+ with `python-docx` (`pip install python-docx`) for **every DOCX operation** — the eight
+  `writing_word_*` tools *and* `writing_audit` called on a `.docx`. The plugin **does not install it**;
+  `postinstall` only probes for it and prints a hint. `.md` / `.tex` / `.txt` audits need no Python.
+
+Repository: https://github.com/Promise4ever/dsh-plugin-writing-guard
 
 ## Why not Humanizer / AI Detector?
 
@@ -201,7 +265,16 @@ Repository: https://github.com/xmutfyh/dsh-plugin-writing-guard
 ## Security & Privacy
 
 - Deterministic integrity checks run locally; semantic writing decisions are handled by the host model under the Writing Guard policy.
-- The plugin only reads the paper files the agent is currently writing/editing and writes its incremental state under `~/.dsh/plugins/dsh-plugin-writing-guard/`.
+- **Data flow, accurately:** the automatic audit reads the paper file you just wrote/edited plus the
+  **first `*.bib`** in the same directory (for local citation integrity), and may read other local files
+  that were explicitly requested. Its incremental state lives at
+  `$DSH_HOME/plugins/dsh-plugin-writing-guard/state.json` and — besides fingerprints — stores
+  **plaintext baselines of the paper text** for cross-run comparison. Manual tools read the files or
+  directories you name in their arguments (`writing_audit` / `writing_style_profile` /
+  `writing_journal_profile` take an **absolute path**). Word tools write the requested `.docx`.
+- Auto-audit is **context injection, not a sandbox**. The write-boundary check in `src/host-adapter.ts` is a
+  compatibility heuristic over the host sandbox policy (lexical path boundary only, no symlink/junction
+  resolution; a missing policy or unknown mode passes through). It is **not** a security fence.
 - The plugin itself does not collect or upload paper content.
 - See [SECURITY.md](SECURITY.md)
 
@@ -211,7 +284,7 @@ Repository: https://github.com/xmutfyh/dsh-plugin-writing-guard
 npm test
 ```
 
-394 deterministic TP / TN / boundary / regression tests covering:
+432 deterministic TP / TN / boundary / regression tests covering:
 
 - STYLE, Scholarship Lock, Epistemic Lock
 - Claim alignment, local citation integrity
@@ -219,7 +292,7 @@ npm test
 - Rhetorical semantics (Chinese / medoid / transition)
 - **DELIVERY (CAL detection)**: rejected alternative / process residue / baseline reality / provenance / defensive hedge / counterfactual pair / NFKC / stopwords / scientific TN / safety TN / real-migration TN
 
-CI runs build + tests on every push / PR.
+This fork has **no CI configured**; the badge row above carries repo and license badges only. Run the suite locally (`pnpm install --ignore-scripts && pnpm build && pnpm test`).
 
 > Deterministic rules (regex + normalization) cannot cover every semantic paraphrase. DELIVERY-layer detection is limited to leakage patterns expressible via regular expressions; manual review remains necessary.
 
@@ -245,6 +318,14 @@ academic-humanizer focuses on rewriting existing text into a more natural style;
 
 Full changelog and implementation details are in [CHANGELOG.md](CHANGELOG.md).
 
+## Credits
+
+This repository is a fork of [xmutfyh/dsh-plugin-writing-guard](https://github.com/xmutfyh/dsh-plugin-writing-guard).
+The rule corpus, tool design and test suite come from upstream; this fork only adapts them to DSH 0.2.1-rc.2,
+fixes one control-notice regression, and corrects the docs/install instructions.
+Upstream bugs belong upstream; fork-specific issues go to
+[this repository's issues](https://github.com/Promise4ever/dsh-plugin-writing-guard/issues).
+
 ## License
 
-MIT
+MIT (same as upstream, see [LICENSE](LICENSE))

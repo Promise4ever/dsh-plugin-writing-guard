@@ -1,8 +1,14 @@
 # Writing Guard
 
-[![CI](https://github.com/xmutfyh/dsh-plugin-writing-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/xmutfyh/dsh-plugin-writing-guard/actions/workflows/ci.yml)
-[![npm](https://img.shields.io/npm/v/dsh-plugin-writing-guard)](https://www.npmjs.com/package/dsh-plugin-writing-guard)
+[![Fork](https://img.shields.io/badge/fork-Promise4ever%2Fdsh--plugin--writing-guard-blue)](https://github.com/Promise4ever/dsh-plugin-writing-guard)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+> **这是 fork，不是上游原版。** 上游：[xmutfyh/dsh-plugin-writing-guard](https://github.com/xmutfyh/dsh-plugin-writing-guard)。
+> 上游的 CI 徽章、npm 包都属于上游仓库；npm 上的 `dsh-plugin-writing-guard` 是上游版本，**不是**这份适配版，本 fork 没有发布 npm 包。
+>
+> 本 fork 把上游 2.0.2 适配到 **DSH 0.2.1-rc.2**（版本号 2.2.0，tag `v2.2.0`），**只在 DSH 0.2.1-rc.2 上验证过**，不承诺其他版本。
+> 相对上游的改动：宿主适配（rc.2 的 peer 范围、消息来源 kind、工具结果协议、Word Python 路径）、控制通知在 rc.2 上被静默丢弃的回归修复、文档与安装方式。
+> 判定规则、规则库与测试集沿用上游，署名见文末「致谢 / Credits」一节，许可见 [License](#license)。
 
 ## Scientific Writing & Document Integrity Guard for AI-assisted research
 
@@ -19,11 +25,15 @@ It protects your manuscript across five layers:
 | **DELIVERY** | Context leakage | prompt、notes、workflow metadata 泄漏 |
 | **DOCUMENT** 🆕 | Document corruption | Word 格式、公式、表格、OOXML 被破坏 |
 
-**Prompt-guided writing · Deterministic integrity core · 394 Tests**
+**Prompt-guided writing · Deterministic integrity core · 432 Tests**
 
 ```
-npm install dsh-plugin-writing-guard
+dsh plugin --profile <profile> add "file:<插件目录的绝对路径>"
 ```
+
+> 本 fork 未发布 npm 包，`npm install dsh-plugin-writing-guard` 装到的是上游原版。
+> 目录形态安装的完整步骤与原因见 [Installation](#installation)。
+> 装完怎么用看 [USAGE.md](USAGE.md)。
 
 > Writing Guard does not write your paper for you.
 > It makes AI-assisted writing safer to ship.
@@ -73,7 +83,7 @@ Writing Guard 1.8 introduces a **document-integrity layer** for Word manuscripts
 
 | Feature | What it does |
 |---------|--------------|
-| **Safe scoped editing** | Only the specified range can change |
+| **Scoped text replacement** | 文本替换只发生在指定范围内；注意 CLI 仍会对**整篇文档**套一遍默认学术格式，范围限制管不到格式，需用 `scope_check` / `fingerprint` 验收 |
 | **Package validation** | Verifies DOCX/OOXML package integrity after editing |
 | **Structural fingerprinting** | Compares document structure before and after |
 | **Equation integrity** | Checks equation structure, numbering continuity, math-font drift |
@@ -107,10 +117,14 @@ Writing Guard 1.8 introduces a **document-integrity layer** for Word manuscripts
 ## Quick Start
 
 ```sh
-# Install
-dsh plugin add dsh-plugin-writing-guard
+# 1) 取得目录形态的插件（二选一，见 Installation）
+#    a. git clone 后 checkout tag v2.2.0
+#    b. 下载 release 的 ZIP 解压到固定目录
 
-# Restart
+# 2) 以目录安装（路径必须是绝对路径，且是含 package.json 的那一层）
+dsh plugin --profile <profile> add "file:D:/path/to/dsh-plugin-writing-guard"
+
+# 3) 重启宿主让 patch 层生效
 dsh web
 ```
 
@@ -200,20 +214,69 @@ writing_word_scan → writing_word_edit → writing_word_scope_check
 
 ## Installation
 
+本 fork **不发布 npm 包**。npm 上的 `dsh-plugin-writing-guard` 是上游原版（不含 rc.2 适配），
+`dsh plugin add dsh-plugin-writing-guard` 装到的也是上游原版。要装这份适配版，只能从本仓库的 git tag 或 release 取。
+
+**能长期用的安装形态只有一个：把插件装成一个目录（`file:<绝对目录>`）。**
+
+### 路线 A：git clone + checkout tag
+
 ```sh
-# From npm (recommended)
-dsh plugin add dsh-plugin-writing-guard
+git clone https://github.com/Promise4ever/dsh-plugin-writing-guard.git
+cd dsh-plugin-writing-guard
+git checkout v2.2.0
 
-# From GitHub
-dsh plugin add github:xmutfyh/dsh-plugin-writing-guard
+# 安装（Windows 路径示例）
+dsh plugin --profile <profile> add "file:D:/path/to/dsh-plugin-writing-guard"
 
-# From local source
-dsh plugin add ./path/to/dsh-plugin-writing-guard
+# 重启宿主
+dsh web
 ```
 
-**Prerequisites:**
-- Node.js ≥ 18
-- Python 3.10+ with `python-docx` (`pip install python-docx`)
+> clone 出来的目录就是插件目录（里面直接有 `package.json`）。**装好后不要移动或删除它**：
+> `file:` 依赖指向这个目录，移走了就失效。
+
+### 路线 B：release ZIP 解压到固定目录
+
+从 [Releases](https://github.com/Promise4ever/dsh-plugin-writing-guard/releases/tag/v2.2.0) 下载 v2.2.0 的 ZIP，
+解压到一个**固定的**目录（如 `D:/plugins/dsh-plugin-writing-guard`），然后同样按目录安装：
+
+```sh
+dsh plugin --profile <profile> add "file:D:/plugins/dsh-plugin-writing-guard"
+dsh web
+```
+
+### 如果报 `ERR_PNPM_IGNORED_BUILDS`
+
+pnpm 默认拦掉依赖的构建脚本（本插件的 `postinstall` 会安装 skill 并复制 Python 资源）。
+按 CLI 打印的提示，把 **pnpm 原样打印的那个键**（例如 `dsh-plugin-writing-guard`）加到
+profile 的 `pnpm-workspace.yaml`：
+
+```yaml
+allowBuilds:
+  dsh-plugin-writing-guard: true
+```
+
+然后重跑上面那条 `dsh plugin ... add` 命令。不要自己编 `allowBuilds` 的键名，抄 pnpm 打印的那一行。
+
+### ⚠️ 本地 `.tgz` 不要用
+
+`dsh plugin add <某个路径>.tgz` 能装成功，但在**有孤儿插件清理行为的 DSH Desktop 构建**上，
+桌面壳启动时会把 `file:`/`link:` 依赖的目标不是目录的一律当成悬挂依赖静默卸载
+（判据是 `is_dir()`，tgz 是文件，恒为 false）。表现为「装完能用，重启后插件列表里没了」。
+
+- 受影响的只是：**本地 `file:*.tgz`** 装在**这类 Desktop 构建**上；
+- 目录形态（`file:<目录>`）不受影响，这是上面两条路线都用目录的原因；
+- 从 registry / HTTPS tarball 安装、以及纯 CLI profile 的情况**没有被证实**存在这个问题，不要一概而论。
+
+### Prerequisites
+
+- **DSH 0.2.1-rc.2**（peer: `@deepseek-ai/dsh-tools` / `@deepseek-ai/dsh-llm` `^0.2.1-rc.2`、`@deepseek-ai/cordis` `^4.0.1`）。
+  本 fork **只在 0.2.1-rc.2 上验证过**，其他版本未验证。
+- Node.js ≥ 22.19.0（DSH 0.2.1 运行时要求）。
+- Python 3.10+ 且装了 `python-docx`（`pip install python-docx`）：所有 DOCX 相关操作都需要，
+  包括 8 个 `writing_word_*` 工具**以及**对 `.docx` 调用 `writing_audit`。插件**不会**替你安装它，
+  `postinstall` 只做检测并在缺失时打印提示。`.md` / `.tex` / `.txt` 的审计不需要 Python。
 
 ---
 
@@ -257,7 +320,10 @@ The LLM/agent decides *what* should change. Deterministic Word code decides *how
 npm test
 ```
 
-394 deterministic tests covering:
+测试集沿用上游（432 条确定性测试）。**本 fork 没有配置 CI**，徽章里也不含 CI/npm 状态徽章；
+需要自己在本地跑，构建 + 测试的命令见 [CHANGELOG.md](CHANGELOG.md)。
+
+432 deterministic tests covering:
 - STYLE, Scholarship Lock, Epistemic Lock
 - Claim alignment, local citation integrity
 - Journal Profile, Journal Fit
@@ -269,8 +335,13 @@ npm test
 ## Security & Privacy
 
 - Deterministic integrity checks run locally; semantic writing decisions are handled by the host model under the Writing Guard policy.
-- The plugin only reads files being edited.
-- The plugin itself does not upload or collect manuscript content.
+- **数据流（准确版）**：
+  - 自动审计读取你刚写入的那个论文文件，以及同目录下找到的**第一个 `*.bib`**（用于本地引用完整性检查）；也可能读取其他被明确请求的本地文件。
+  - 增量状态写在 `$DSH_HOME/plugins/dsh-plugin-writing-guard/state.json`；其中除指纹外，**还保存论文正文的明文 baseline**，用于跨轮次比对。
+  - 手动工具读取你在参数里点名的文件或目录（`writing_audit` / `writing_style_profile` / `writing_journal_profile` 请传**绝对路径**）。
+  - Word 工具会写入你指定的 `.docx`。
+- 自动审计是**上下文注入**，不是沙箱。`src/host-adapter.ts` 里的写边界检查只是按宿主 sandbox 策略做的兼容性启发式（词法路径判断，不解析 symlink / junction；读不到策略或模式未知时直接放行），**不构成安全隔离**。
+- 插件自身不上传、不收集稿件内容。
 - See [SECURITY.md](SECURITY.md)
 
 ---
@@ -314,6 +385,12 @@ npm test
 
 See [CHANGELOG.md](CHANGELOG.md).
 
+## 致谢 / Credits
+
+本仓库是 [xmutfyh/dsh-plugin-writing-guard](https://github.com/xmutfyh/dsh-plugin-writing-guard) 的 fork。
+规则库、工具设计与测试集均来自上游；本 fork 只做 DSH 0.2.1-rc.2 适配、一处控制通知回归修复，以及文档/安装方式的修订。
+上游问题请反馈给上游仓库；本 fork 引入的问题请提到 [本仓库 Issues](https://github.com/Promise4ever/dsh-plugin-writing-guard/issues)。
+
 ## License
 
-MIT
+MIT（与上游一致，见 [LICENSE](LICENSE)）

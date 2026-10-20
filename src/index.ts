@@ -31,13 +31,28 @@ import {
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
+import { fileURLToPath } from 'node:url'
+import {
+  checkWriteAllowed,
+  executionKey,
+  getSandboxPolicy,
+  getSessionCwd,
+  NOTICE_SOURCE,
+  resolveTarget,
+  targetPathOf,
+  writeOutcome,
+} from './host-adapter.ts'
 
 export const name = 'dsh-plugin-writing-guard'
 
 export const inject = ['tools']
 
-/** 插件目录（用于定位 word_guard Python 模块） */
-const PLUGIN_DIR = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1'))
+/**
+ * 插件目录（用于定位 word_guard Python 模块）。
+ * v2.1：必须用 fileURLToPath——旧实现的 `URL.pathname` 不解码 %20/%E4…，
+ * 插件装在含空格或中文的路径下（如 D:\\Codex Workspace\\...）会拼出无效路径。
+ */
+const PLUGIN_DIR = path.dirname(fileURLToPath(import.meta.url))
 
 export type Mode = 'conservative' | 'balanced' | 'strict'
 
@@ -90,15 +105,52 @@ const DEFAULT_CONFIG: Config = {
 /** 默认项目内部词表（通用痕迹，不含 priority/SHA-256 等普通学术词） */
 const DEFAULT_PROJECT_TERMS = ['source_map', 'reader 锚点', 'iteration_log', 'final_audit', 'blueprint', 'full_corpus']
 
-// v2.0: DSH runtime exposes agent lifecycle events even when the installed type package omits them.
-type AgentLifecyclePayload = { agent: { id: string }; turn: number }
+/**
+ * v2.1：DSH 0.2.1-rc.2 的 agent 事件 payload（结构类型，避免对 dsh-agent 包的硬依赖）。
+ * agent/turn-stopping 在 rc.2 仍带 turn；agent/disposed 只带 agent。
+ */
+interface HostAgent {
+  readonly id: string
+  readonly session?: unknown
+  /** rc.2：Queue model-facing context for the next pre-step without waking the driver */
+  inject?: (message: unknown) => void
+}
+
+type AgentLifecyclePayload = { agent: HostAgent; turn?: number }
+
 function onAgentLifecycle(
   ctx: Context,
   event: 'agent/disposed' | 'agent/turn-stopping',
-  handler: (payload: AgentLifecyclePayload) => void,
+  handler: (payload: AgentLifecyclePayload) => void | Promise<void>,
 ): void {
-  const on = ctx.on as unknown as (eventName: string, cb: (payload: AgentLifecyclePayload) => void) => void
+  const on = ctx.on as unknown as (
+    eventName: string,
+    cb: (payload: AgentLifecyclePayload) => void | Promise<void>,
+  ) => () => boolean
   on.call(ctx, event, handler)
+}
+
+/**
+ * v2.2：把通知挂到下一次模型请求的上下文里。
+ *
+ * 必须走 decision.additionalContexts，**不能**在 tools/post-execute 里调用
+ * exec.deferContext。rc.2 宿主把 deferContext 收集的队列在
+ * dispatchScheduledExecution 内合并（dsh-tools/lib/index.js:3429-3435），
+ * 那一步在 finalizeScheduledExecution → postExecute（:3464）之前就执行完了；
+ * 所以在 post-execute 监听器里追加的 deferContext 永远进不了最终结果，
+ * 通知会被静默丢弃（这就是 v2.1 在真实宿主上"审计落盘但模型看不到"的原因）。
+ * 只有 tools/execute 包装器或工具本体内部调用的 deferContext 才有效。
+ *
+ * postExecute 真正合并的是 decision.additionalContexts
+ * （dsh-tools/lib/index.js:3601-3626），block 决策会丢弃 result 侧上下文、
+ * 只保留决策自带的，因此把通知挂在决策上在 accept/block 两条路径都成立。
+ */
+export function attachContext<T extends object>(_exec: unknown, decision: T, message: unknown): T {
+  const withContext = decision as T & { additionalContexts?: unknown[] }
+  return {
+    ...decision,
+    additionalContexts: [...(withContext.additionalContexts ?? []), message],
+  } as unknown as T
 }
 
 /**
@@ -245,25 +297,103 @@ function queueSave(
   })
 }
 
-/** 从文件读取文本（.txt/.md/.markdown 直接读；.docx 通过 Python word_guard 提取） */
-async function readTextFile(filePath: string): Promise<string> {
-  const ext = path.extname(filePath).toLowerCase()
-  if (ext === '.docx' || ext === '.doc') {
-    // v1.8：通过 Python word_guard 提取 DOCX 文本（无需 anydoc 中转）
+/** Python word_guard 模块路径（构建后随包发布到 lib/word_guard/cli.py，与 PLUGIN_DIR 一致） */
+const WORD_GUARD_CLI = path.join(PLUGIN_DIR, 'word_guard', 'cli.py')
+
+/** Python 解释器候选（DSH_PYTHON 优先；Windows 常只有 python） */
+function pythonCandidates(): string[] {
+  const explicit = process.env.DSH_PYTHON?.trim()
+  if (explicit) return [explicit]
+  return process.platform === 'win32' ? ['python', 'python3'] : ['python3', 'python']
+}
+
+/**
+ * 调用 Python word_guard CLI。v2.1 修正三处宿主边界问题：
+ * 1. 只在"解释器不存在"（ENOENT/EACCES）时换下一个候选——旧实现任何失败都静默换，
+ *    写操作（edit / format-tables）可能被执行两次；
+ * 2. stdout 显式按 UTF-8 解码并设置 PYTHONIOENCODING/PYTHONUTF8——
+ *    ensure_ascii=False 的 JSON 在 cp936 控制台下会按 GBK 写管道，Node 默认 UTF-8 解码即乱码；
+ * 3. 透传 AbortSignal 与 cwd（相对路径由调用方按会话 cwd 解析后传入）。
+ */
+async function callWordGuardAt(
+  command: string,
+  extraArgs: readonly string[],
+  signal?: AbortSignal,
+  cwd?: string,
+): Promise<string> {
+  const { execFile } = await import('node:child_process')
+  const args = [WORD_GUARD_CLI, command, ...extraArgs]
+  const candidates = pythonCandidates()
+  let lastError: unknown
+  for (const pythonCmd of candidates) {
     try {
-      const { execFile } = await import('node:child_process')
-      const pythonCmd = process.env.DSH_PYTHON ?? 'python3'
-      const wordGuardCli = path.join(PLUGIN_DIR, 'word_guard', 'cli.py')
-      const args = [wordGuardCli, 'audit', filePath]
       return await new Promise<string>((resolve, reject) => {
-        execFile(pythonCmd, args, { maxBuffer: 10 * 1024 * 1024, timeout: 30_000 }, (err, stdout) => {
-          if (err) reject(new Error(`DOCX text extraction failed: ${err.message}`))
-          else resolve(stdout)
-        })
+        execFile(
+          pythonCmd,
+          args,
+          {
+            maxBuffer: 10 * 1024 * 1024,
+            timeout: 60_000,
+            encoding: 'utf8',
+            cwd: cwd && path.isAbsolute(cwd) ? cwd : undefined,
+            signal,
+            env: { ...process.env, PYTHONIOENCODING: 'utf8', PYTHONUTF8: '1' },
+          },
+          (err, stdout, stderr) => {
+            if (!err) {
+              resolve(stdout)
+              return
+            }
+            const code = (err as NodeJS.ErrnoException).code
+            if (code === 'ENOENT' || code === 'EACCES') {
+              const missing = new Error(`interpreter ${pythonCmd} unavailable: ${err.message}`)
+              ;(missing as { interpreterMissing?: boolean }).interpreterMissing = true
+              reject(missing)
+              return
+            }
+            reject(new Error(`word_guard ${command} failed: ${err.message}\n${stderr ?? ''}`))
+          },
+        )
       })
     } catch (e) {
-      throw new Error(`"${filePath}" 是 DOCX 文档，文本提取失败: ${e instanceof Error ? e.message : String(e)}。请先调用 anydoc 工具转换为 Markdown。`)
+      lastError = e
+      if ((e as { interpreterMissing?: boolean }).interpreterMissing) continue
+      throw e
     }
+  }
+  throw new Error(
+    `找不到可用的 Python 解释器（尝试过：${candidates.join(', ')}；可用 DSH_PYTHON 指定）：` +
+      (lastError instanceof Error ? lastError.message : String(lastError)),
+  )
+}
+
+/**
+ * 从文件读取文本（.txt/.md/.markdown 直接读；.docx 通过 Python word_guard 提取）。
+ * v2.1：docx 分支改用 `extract` 命令并解析 JSON 的 paragraphs 拼正文——
+ * 旧实现调 `audit` 把整份 JSON 报告（issues/text_preview）当作文稿正文喂给规则引擎。
+ */
+async function readTextFile(filePath: string, signal?: AbortSignal): Promise<string> {
+  const ext = path.extname(filePath).toLowerCase()
+  if (ext === '.docx') {
+    const raw = await callWordGuardAt('extract', [filePath], signal)
+    let parsed: { paragraphs?: Array<{ text?: unknown }>; text?: unknown; error?: unknown }
+    try {
+      parsed = JSON.parse(raw) as typeof parsed
+    } catch {
+      throw new Error(`"${filePath}" 的 DOCX 文本提取结果不是合法 JSON，无法审计`)
+    }
+    if (typeof parsed.error === 'string') throw new Error(parsed.error)
+    if (typeof parsed.text === 'string') return parsed.text
+    if (Array.isArray(parsed.paragraphs)) {
+      return parsed.paragraphs
+        .map((p) => (typeof p?.text === 'string' ? p.text : ''))
+        .filter((t) => t.length > 0)
+        .join('\n')
+    }
+    throw new Error(`"${filePath}" 的 DOCX 文本提取结果缺少 paragraphs/text 字段`)
+  }
+  if (ext === '.doc') {
+    throw new Error(`"${filePath}" 是旧版 .doc 文档，python-docx 只能读取 .docx。请先另存为 .docx 或转换为 Markdown。`)
   }
   if (ext === '.pdf') {
     throw new Error(`"${filePath}" 是 PDF 文档，请先调用 anydoc 工具转换为 Markdown，再对转换结果执行 writing_audit`)
@@ -309,17 +439,20 @@ function isPaperFile(filePath: string, cwd?: string): boolean {
   return false
 }
 
-/** 提取 write/edit 的目标文件路径 */
-function targetPathOf(exec: { name?: string; arguments?: unknown }): string | null {
-  const name = exec.name
-  if (name !== 'write' && name !== 'edit') return null
-  const args = exec.arguments as { file_path?: string; filePath?: string } | null | undefined
-  const p = args?.file_path ?? args?.filePath
-  return typeof p === 'string' && p ? p : null
-}
+// v2.1：目标文件识别已移到 src/host-adapter.ts（覆盖 write/edit 与 dsh-ops 的
+// ops_write_file / ops_edit_file / ops_replace），这里直接复用其 targetPathOf。
 
 /** 导出供 tests/run-tests.mjs 回归（自动审计的文件识别规则） */
 export { isPaperFile }
+
+/**
+ * 默认状态文件路径。v2.1：优先 DSH_HOME（profile 隔离），回退 ~/.dsh；
+ * 旧实现写死 os.homedir()，在自定义 DSH_HOME 下状态会落到错误位置。
+ */
+function defaultStateFile(): string {
+  const home = process.env.DSH_HOME?.trim() || path.join(os.homedir(), '.dsh')
+  return path.join(home, 'plugins', 'dsh-plugin-writing-guard', 'state.json')
+}
 
 export function apply(ctx: Context, config: Partial<Config> = {}): void {
   const cfg = { ...DEFAULT_CONFIG, ...config }
@@ -330,9 +463,7 @@ export function apply(ctx: Context, config: Partial<Config> = {}): void {
     : cfg.autoAuditMinSeverity
   // v0.5：增量状态持久化（缺省 ~/.dsh/plugins/dsh-plugin-writing-guard/state.json）
   // v0.5.1：stateFile 空串/空白 → 用默认路径（'' ?? default 仍是 ''，会让持久化静默失效）
-  const stateFile = cfg.stateFile?.trim()
-    ? path.resolve(cfg.stateFile)
-    : path.join(os.homedir(), '.dsh', 'plugins', 'dsh-plugin-writing-guard', 'state.json')
+  const stateFile = cfg.stateFile?.trim() ? path.resolve(cfg.stateFile) : defaultStateFile()
   const stateLoaded = loadState(stateFile).catch(() => emptyState())
   // v0.9：preimage 按 exec.token 键控（同一文件并发 edit 不串扰；分析建议），
   // 内部保留 path 校验；token 缺失时回退到文件路径键。优先级高于持久化基线缓存。
@@ -645,35 +776,31 @@ export function apply(ctx: Context, config: Partial<Config> = {}): void {
 
   // ---------- Word 文档安全编辑工具（v1.8） ----------
 
-  /** Python word_guard 模块路径 */
-  const WORD_GUARD_PATH = path.join(PLUGIN_DIR, 'word_guard', 'cli.py')
+  /** 取本次工具调用的会话（rc.2：ToolExecution.agent.session） */
+  function sessionOf(exec: unknown): unknown {
+    return (exec as { agent?: { session?: unknown } } | null | undefined)?.agent?.session
+  }
 
-  /** 调用 Python word_guard 模块的辅助函数 */
-  async function callWordGuard(command: string, ...extraArgs: string[]): Promise<string> {
-    const { execFile } = await import('node:child_process')
-    // 优先级：DSH_PYTHON > python3 > python（Windows 常只有 python）
-    const candidates = process.env.DSH_PYTHON
-      ? [process.env.DSH_PYTHON]
-      : process.platform === 'win32'
-        ? ['python', 'python3']
-        : ['python3', 'python']
-    const args = [WORD_GUARD_PATH, command, ...extraArgs]
-    // Try each candidate until one works
-    for (const pythonCmd of candidates) {
-      try {
-        const result = await new Promise<string>((resolve, reject) => {
-          execFile(pythonCmd, args, { maxBuffer: 10 * 1024 * 1024, timeout: 60_000 }, (err, stdout, stderr) => {
-            if (err) reject(new Error(`word_guard ${command} failed: ${err.message}\n${stderr}`))
-            else resolve(stdout)
-          })
-        })
-        return result
-      } catch (e) {
-        if (pythonCmd === candidates[candidates.length - 1]) throw e
-        // Try next candidate
-      }
+  /**
+   * 把工具参数里的路径解析成绝对路径：相对路径相对**会话工作目录**，
+   * 而不是宿主进程 cwd（旧实现直接把相对路径丢给 Python，子进程 cwd 是宿主进程 cwd）。
+   */
+  function resolveUserPath(exec: unknown, p: string): string {
+    const cwd = getSessionCwd(ctx as unknown as { get?: (n: string) => unknown }, sessionOf(exec))
+    return resolveTarget(p, cwd)
+  }
+
+  /**
+   * Word 写工具（edit / format-tables）的沙箱边界检查。
+   * 宿主 fs-sandbox 只围栏自身的文件写接口，Python 子进程写文件不受其保护，
+   * 因此插件必须自己按会话政策拒绝越界写入（服务未挂载时保持旧行为）。
+   */
+  function assertWordWriteAllowed(exec: unknown, targets: readonly string[]): void {
+    const policy = getSandboxPolicy(ctx as unknown as { get?: (n: string) => unknown }, sessionOf(exec))
+    for (const target of targets) {
+      const reason = checkWriteAllowed(policy, target)
+      if (reason) throw new Error(reason)
     }
-    throw new Error('No Python interpreter found')
   }
 
   ctx.tools.register(defineTool({
@@ -690,11 +817,11 @@ export function apply(ctx: Context, config: Partial<Config> = {}): void {
       render: (_args, value) => [{ type: 'text', text: value }],
     },
     isConcurrencySafe: () => true,
-    async execute(args) {
+    async execute(args, exec) {
       const filePath = args.filePath as string
       if (!filePath) throw new Error('需要提供 filePath')
-      const result = await callWordGuard('scan', filePath)
-      return result
+      const abs = resolveUserPath(exec, filePath)
+      return await callWordGuardAt('scan', [abs], exec.signal)
     },
   }))
 
@@ -744,7 +871,7 @@ export function apply(ctx: Context, config: Partial<Config> = {}): void {
       render: (_args, value) => [{ type: 'text', text: value }],
     },
     isConcurrencySafe: () => false,
-    async execute(args) {
+    async execute(args, exec) {
       const filePath = args.filePath as string
       const replacements = args.replacements as Array<{ old: string; new: string }>
       const scopeConfig = args.scopeConfig as Record<string, unknown> | undefined
@@ -752,6 +879,11 @@ export function apply(ctx: Context, config: Partial<Config> = {}): void {
       const outputPath = args.outputPath as string | undefined
       if (!filePath) throw new Error('需要提供 filePath')
       if (!replacements || replacements.length === 0) throw new Error('需要提供 replacements')
+
+      const absInput = resolveUserPath(exec, filePath)
+      const absOutput = outputPath ? resolveUserPath(exec, outputPath) : absInput
+      // v2.1：Python 子进程写文件不受宿主 fs-sandbox 保护，插件自己按会话政策拦越界写入
+      assertWordWriteAllowed(exec, [absOutput])
 
       // Build scope config JSON for Python
       const scopeJson = scopeConfig ? JSON.stringify(scopeConfig) : 'null'
@@ -761,16 +893,14 @@ export function apply(ctx: Context, config: Partial<Config> = {}): void {
       const tmpFile = path.join(os.tmpdir(), `wg_edit_${Date.now()}.json`)
       await fs.writeFile(tmpFile, replacementsJson, 'utf8')
 
-      const outputArg = outputPath ?? filePath
-      const args2 = [filePath, tmpFile, outputArg, mode]
-      if (scopeConfig) args2.push(scopeJson)
-
-      const result = await callWordGuard('edit', ...args2)
-
-      // Cleanup temp file
-      try { await fs.unlink(tmpFile) } catch { /* ignore */ }
-
-      return result
+      try {
+        const args2 = [absInput, tmpFile, absOutput, mode]
+        if (scopeConfig) args2.push(scopeJson)
+        return await callWordGuardAt('edit', args2, exec.signal)
+      } finally {
+        // v2.1：无论成功/失败/取消都清理临时文件（旧实现只在成功路径删）
+        try { await fs.unlink(tmpFile) } catch { /* ignore */ }
+      }
     },
   }))
 
@@ -788,11 +918,10 @@ export function apply(ctx: Context, config: Partial<Config> = {}): void {
       render: (_args, value) => [{ type: 'text', text: value }],
     },
     isConcurrencySafe: () => true,
-    async execute(args) {
+    async execute(args, exec) {
       const filePath = args.filePath as string
       if (!filePath) throw new Error('需要提供 filePath')
-      const result = await callWordGuard('audit', filePath)
-      return result
+      return await callWordGuardAt('audit', [resolveUserPath(exec, filePath)], exec.signal)
     },
   }))
 
@@ -819,13 +948,16 @@ export function apply(ctx: Context, config: Partial<Config> = {}): void {
       render: (_args, value) => [{ type: 'text', text: value }],
     },
     isConcurrencySafe: () => true,
-    async execute(args) {
+    async execute(args, exec) {
       const fileBefore = args.fileBefore as string
       const fileAfter = args.fileAfter as string
       if (!fileBefore || !fileAfter) throw new Error('需要提供 fileBefore 和 fileAfter')
       const scopeJson = args.scopeConfig ? JSON.stringify(args.scopeConfig) : 'null'
-      const result = await callWordGuard('scope-check', fileBefore, fileAfter, scopeJson)
-      return result
+      return await callWordGuardAt(
+        'scope-check',
+        [resolveUserPath(exec, fileBefore), resolveUserPath(exec, fileAfter), scopeJson],
+        exec.signal,
+      )
     },
   }))
 
@@ -844,13 +976,15 @@ export function apply(ctx: Context, config: Partial<Config> = {}): void {
       render: (_args, value) => [{ type: 'text', text: value }],
     },
     isConcurrencySafe: () => false,
-    async execute(args) {
+    async execute(args, exec) {
       const filePath = args.filePath as string
       const outputPath = args.outputPath as string | undefined
       if (!filePath) throw new Error('需要提供 filePath')
-      const args2 = outputPath ? [filePath, outputPath] : [filePath]
-      const result = await callWordGuard('format-tables', ...args2)
-      return result
+      const absInput = resolveUserPath(exec, filePath)
+      const absOutput = outputPath ? resolveUserPath(exec, outputPath) : absInput
+      assertWordWriteAllowed(exec, [absOutput])
+      const args2 = outputPath ? [absInput, absOutput] : [absInput]
+      return await callWordGuardAt('format-tables', args2, exec.signal)
     },
   }))
 
@@ -868,13 +1002,14 @@ export function apply(ctx: Context, config: Partial<Config> = {}): void {
       render: (_args, value) => [{ type: 'text', text: value }],
     },
     isConcurrencySafe: () => true,
-    async execute(args) {
+    async execute(args, exec) {
       const filePath = args.filePath as string
       const baselinePath = args.baselinePath as string | undefined
       if (!filePath) throw new Error('需要提供 filePath')
-      const args2 = baselinePath ? [filePath, baselinePath] : [filePath]
-      const result = await callWordGuard('equation-audit', ...args2)
-      return result
+      const args2 = baselinePath
+        ? [resolveUserPath(exec, filePath), resolveUserPath(exec, baselinePath)]
+        : [resolveUserPath(exec, filePath)]
+      return await callWordGuardAt('equation-audit', args2, exec.signal)
     },
   }))
 
@@ -892,10 +1027,10 @@ export function apply(ctx: Context, config: Partial<Config> = {}): void {
       render: (_args, value) => [{ type: 'text', text: value }],
     },
     isConcurrencySafe: () => true,
-    async execute(args) {
+    async execute(args, exec) {
       const filePath = args.filePath as string
       if (!filePath) throw new Error('需要提供 filePath')
-      return await callWordGuard('package-validate', filePath)
+      return await callWordGuardAt('package-validate', [resolveUserPath(exec, filePath)], exec.signal)
     },
   }))
 
@@ -913,10 +1048,10 @@ export function apply(ctx: Context, config: Partial<Config> = {}): void {
       render: (_args, value) => [{ type: 'text', text: value }],
     },
     isConcurrencySafe: () => true,
-    async execute(args) {
+    async execute(args, exec) {
       const filePath = args.filePath as string
       if (!filePath) throw new Error('需要提供 filePath')
-      return await callWordGuard('fingerprint', filePath)
+      return await callWordGuardAt('fingerprint', [resolveUserPath(exec, filePath)], exec.signal)
     },
   }))
 
@@ -938,20 +1073,23 @@ export function apply(ctx: Context, config: Partial<Config> = {}): void {
       injectCounts.delete(agent.id)
     })
 
-    // v0.8：pre-execute 捕获 write/edit 前的文本（修改前快照）——
+    // v2.1：pre-execute 捕获写工具前的文本（修改前快照）——
     // 签名 (exec, next) => PreToolDecision，必须放行：return next()。
-    // 自动路径的 Scholarship/Epistemic Lock 依赖它；捕获失败（新文件/不可读）时
-    // 回退到持久化基线缓存（上次观测到的内容）。
+    // 目标识别/路径解析/执行键统一走 host-adapter：
+    // - 覆盖官方 write/edit 与 dsh-ops 的 ops_write_file / ops_edit_file / ops_replace
+    //   （旧 targetPathOf 只认 write/edit，ops_* 的写全部漏掉 preimage 与自动审计）；
+    // - 相对路径按会话工作目录解析（旧实现按宿主进程 cwd 读，读不到就当"新文件"）；
+    // - exec.token 是 branded symbol，String() 后全部相同，改用 executionKey 分配稳定 id。
     ctx.on('tools/pre-execute', async (exec, next) => {
       try {
-        const target = targetPathOf(exec)
-        if (!target) return next()
-        const agent = exec as { agent?: { id?: string; session?: { header?: { cwd?: string } } } }
-        if (!agent.agent || typeof agent.agent.id !== 'string') return next()
-        if (!isPaperFile(target, agent.agent.session?.header?.cwd)) return next()
-        // v0.9：exec.token 作为 key（DSH 官方 execution state 范式），path 存进条目用于校验
-        const token = (exec as { token?: unknown }).token
-        const key = typeof token === 'string' && token ? token : target
+        const rawTarget = targetPathOf(exec)
+        if (!rawTarget) return next()
+        const agent = (exec as { agent?: { id?: string; session?: unknown } }).agent
+        if (!agent || typeof agent.id !== 'string') return next()
+        const cwd = getSessionCwd(ctx as unknown as { get?: (name: string) => unknown }, agent.session)
+        const target = resolveTarget(rawTarget, cwd)
+        if (!isPaperFile(target, cwd)) return next()
+        const key = executionKey(exec)
         preimages.set(key, { path: target, content: await fs.readFile(target, 'utf8'), ts: Date.now() })
       } catch {
         // 新文件或不可读：无 preimage（首次写入无基线；后续写入由基线缓存兜底）
@@ -959,26 +1097,32 @@ export function apply(ctx: Context, config: Partial<Config> = {}): void {
       return next()
     })
 
-    ctx.on('tools/post-execute', async (exec, _result, next) => {
+    ctx.on('tools/post-execute', async (exec, result, next) => {
       // 先放行原始结果，拿到决策
       const decision = await next()
       try {
-        const target = targetPathOf(exec)
-        if (!target) return decision
-        const agent = (exec as { agent?: { id?: string } }).agent
+        const rawTarget = targetPathOf(exec)
+        if (!rawTarget) return decision
+        const agent = (exec as { agent?: { id?: string; session?: unknown } }).agent
         if (!agent || typeof agent.id !== 'string') return decision
+        // 被宿主 block 的调用没有落地，不能审计
+        if ((decision as { kind?: string }).kind === 'block') return decision
+        // v2.1 分层判定真实效果：dry-run / 失败 / 未知一律不审计
+        // （旧实现不看结果，dryRun 预览、rejected、isError 都会被当成"写成功"）
+        if (writeOutcome(result) !== 'applied') return decision
+        const cwd = getSessionCwd(ctx as unknown as { get?: (name: string) => unknown }, agent.session)
+        const target = resolveTarget(rawTarget, cwd)
 
         // 只审计论文类文件
-        if (!isPaperFile(target, (agent as { session?: { header?: { cwd?: string } } }).session?.header?.cwd)) return decision
+        if (!isPaperFile(target, cwd)) return decision
 
         let report: AuditReport
         try {
           const profile = detectDocumentProfile(target)
           const afterContent = await readTextFile(target)
-          // v0.9 自动 Scholarship/Epistemic Lock：preimage（exec.token 键控）优先，否则用基线缓存；
+          // v0.9 自动 Scholarship/Epistemic Lock：preimage（executionKey 键控）优先，否则用基线缓存；
           // preimage 条目需与本次目标文件同路径（token 复用/路径变化时不误配 before/after）
-          const token = (exec as { token?: unknown }).token
-          const key = typeof token === 'string' && token ? token : target
+          const key = executionKey(exec)
           const pre = preimages.get(key)
           preimages.delete(key)
           const original = pre && pre.path === target ? pre.content : (await stateLoaded).baselines.get(target)?.content
@@ -1030,9 +1174,10 @@ export function apply(ctx: Context, config: Partial<Config> = {}): void {
           if (diff.remaining === 0) {
             const notice = createUserMessage({
               content: [{ type: 'text', text: `【dsh-plugin-writing-guard】"${target}" 写作纪律问题已全部清零 ✅` }],
-              source: { kind: 'plugin', plugin: name },
+              source: NOTICE_SOURCE,
             })
-            return { ...decision, additionalContexts: [...(decision.additionalContexts ?? []), notice] }
+            // v2.1：优先 exec.deferContext（被外层 block 时宿主自动丢弃），回退 additionalContexts
+            return attachContext(exec, decision, notice)
           }
           return decision // 部分解决、无新增：安静等待下次 added 汇总
         }
@@ -1048,14 +1193,11 @@ export function apply(ctx: Context, config: Partial<Config> = {}): void {
 
         const notice = createUserMessage({
           content: [{ type: 'text', text }],
-          source: { kind: 'plugin', plugin: name },
+          source: NOTICE_SOURCE,
         })
 
         // 把自动审计结果作为下一条请求的附加上下文（不阻塞本次调用）
-        return {
-          ...decision,
-          additionalContexts: [...(decision.additionalContexts ?? []), notice],
-        }
+        return attachContext(exec, decision, notice)
       } catch (error) {
         ctx.logger.warn(`dsh-plugin-writing-guard: auto audit failed: ${error instanceof Error ? error.message : String(error)}`)
         return decision
@@ -1074,17 +1216,25 @@ export function apply(ctx: Context, config: Partial<Config> = {}): void {
       briefCounts.delete(agent.id)
     })
 
+    // v2.1：注入通道改用 rc.2 的公开方法 agent.inject(message)——
+    // 语义正是 "Queue model-facing context for the next pre-step without waking the driver"。
+    // 旧实现写成 (agent as { inject?: ... }).inject?.()，在方法被改名/移除时会静默失效。
     onAgentLifecycle(ctx, 'agent/turn-stopping', async ({ agent, turn }) => {
       try {
-        const cwd = (agent as { session?: { header?: { cwd?: string } } }).session?.header?.cwd
+        const cwd = getSessionCwd(ctx as unknown as { get?: (name: string) => unknown }, agent.session)
         // 只在论文工作区注入（知识库布局或路径含论文特征；与 isPaperFile 同词表）
         if (!cwd || !isPaperPath(cwd)) return
+        const currentTurn = typeof turn === 'number' ? turn : -1
         const prev = briefCounts.get(agent.id)
-        if (prev && turn - prev.turn < BRIEF_EVERY_TURNS) return
-        briefCounts.set(agent.id, { turn })
-        ;(agent as { inject?: (msg: unknown) => void }).inject?.(createUserMessage({
+        if (prev && currentTurn - prev.turn < BRIEF_EVERY_TURNS) return
+        briefCounts.set(agent.id, { turn: currentTurn })
+        if (typeof agent.inject !== 'function') {
+          ctx.logger.warn('dsh-plugin-writing-guard: 当前宿主 agent 没有 inject(message) 方法，autoBrief 跳过')
+          return
+        }
+        agent.inject(createUserMessage({
           content: [{ type: 'text', text: rulesBrief() }],
-          source: { kind: 'plugin', plugin: name },
+          source: NOTICE_SOURCE,
         }))
       } catch (error) {
         ctx.logger.warn(`dsh-plugin-writing-guard: autoBrief failed: ${error instanceof Error ? error.message : String(error)}`)

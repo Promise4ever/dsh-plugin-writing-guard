@@ -1,18 +1,22 @@
 {
   "name": "dsh-plugin-writing-guard",
-  "version": "2.0.2",
+  "version": "2.2.0",
   "description": "Scientific writing & document integrity guard for AI-assisted research - prompt-guided argument economy with deterministic scientific, delivery, journal, and Word integrity checks.",
   "type": "module",
   "main": "lib/index.js",
   "files": [
+    "USAGE.md",
     "lib",
+    "!lib/**/__pycache__",
     "src/word_guard",
+    "!src/**/__pycache__",
     "skills",
     "scripts",
+    "!scripts/.dsh-ops-update-*.lock",
     "cordis.patch.yml"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node scripts/copy-word-guard.mjs",
     "pretest": "npm run build",
     "test": "node tests/run-tests.mjs",
     "postinstall": "node scripts/install-extras.mjs"
@@ -24,15 +28,15 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/xmutfyh/dsh-plugin-writing-guard.git"
+    "url": "git+https://github.com/Promise4ever/dsh-plugin-writing-guard.git"
   },
-  "homepage": "https://github.com/xmutfyh/dsh-plugin-writing-guard#readme",
+  "homepage": "https://github.com/Promise4ever/dsh-plugin-writing-guard#readme",
   "bugs": {
-    "url": "https://github.com/xmutfyh/dsh-plugin-writing-guard/issues"
+    "url": "https://github.com/Promise4ever/dsh-plugin-writing-guard/issues"
   },
   "packageManager": "pnpm@11.21.0",
   "engines": {
-    "node": ">=18"
+    "node": ">=22.19.0"
   },
   "keywords": [
     "academic-writing",
@@ -53,13 +57,13 @@
   "license": "MIT",
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6",
-    "@deepseek-ai/dsh-llm": "^0.1.0-rc.6"
+    "@deepseek-ai/dsh-tools": "^0.2.1-rc.2",
+    "@deepseek-ai/dsh-llm": "^0.2.1-rc.2"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "4.0.1",
-    "@deepseek-ai/dsh-tools": "0.1.0-rc.6",
-    "@deepseek-ai/dsh-llm": "0.1.0-rc.6",
+    "@deepseek-ai/cordis": "4.0.5",
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-llm": "0.2.1-rc.2",
     "@types/node": "^26.2.0",
     "typescript": "^7.0.2"
   }

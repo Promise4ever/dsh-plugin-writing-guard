@@ -22,4 +22,9 @@ Thumbs.db
 __pycache__/
 *.pyc
 node_modules/
-lib/
+
+# dsh-ops transient update locks (created next to edited files)
+.dsh-ops-update-*.lock
+
+# npm pack output (release artifacts are attached, not committed)
+*.tgz

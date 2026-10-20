@@ -4,6 +4,77 @@ All notable changes to dsh-plugin-writing-guard are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+> **关于版本归属**：本文件记录的是 fork 仓库
+> [Promise4ever/dsh-plugin-writing-guard](https://github.com/Promise4ever/dsh-plugin-writing-guard)
+> 的变化。2.2.0 及以前来自上游
+> [xmutfyh/dsh-plugin-writing-guard](https://github.com/xmutfyh/dsh-plugin-writing-guard)，
+> 由本 fork 原样继承；本 fork 新增的条目会在标题里标注「fork」。
+
+## [2.2.0] - 2026-10-20
+
+### Fixed — 控制通知在 rc.2 上被静默丢弃（关键回归）
+
+2.1.0 把通知注入改成"优先 `exec.deferContext`，回退 `additionalContexts`"。在 `tools/post-execute` 监听器里调用 `deferContext` 在 0.2.1-rc.2 上是**无效**的：
+
+- `dsh-tools/lib/index.js:3423-3446` `dispatchScheduledExecution` 在 `:3429` 就取走 `this.deferredContexts.get(exec)` 并在 `:3432-3435` 合并进结果的 `additionalContexts`；
+- 而 `postExecute` 直到 `:3455-3469` `finalizeScheduledExecution` 的 `:3464` 才被调用——晚于合并点。
+
+结果是审计正常落盘、终端也能看到，但模型上下文里永远收不到 `<writing_guard_control>`。已在真实宿主（headless profile + 0.2.1-rc.2）上复现，并用会话日志确认。
+
+修复：`src/index.ts:135-158` 的 `attachContext` 不再调用 `exec.deferContext`，而是始终把消息并进**决策侧**的 `additionalContexts`——`dsh-tools/lib/index.js:3601-3626` 才是 `postExecute` 真正读取并合并的位置（`block` 决策时丢弃结果侧上下文、只保留决策自带的，语义仍然正确）。函数改为 `export` 以便直接断言。
+
+必须走决策侧的原因是时序：宿主在 `dispatchScheduledExecution` 里先合并 `deferContext` 再调用 `postExecute`，所以 `postExecute` 里再 `deferContext` 已经错过了合并点——不是「可选的回退路径」问题，而是唯一可行的位置。
+
+### Changed
+
+- 版本号 2.1.0 → 2.2.0：`package.json`、`PLUGIN_VERSION`（`src/rules.ts` / `lib/rules.js`）、`skills/writing-guard/manifest.yaml`、测试断言同步。
+
+### Tests
+
+- 第 13 节新增 6 条 `attachContext` 断言：返回 `additionalContexts`、保留原决策 `kind`、不依赖 `exec.deferContext`、可用于 `block` 决策、保留已有 contexts、`exec` 缺失时容错。
+- All 432 tests passing（`pnpm install --ignore-scripts && pnpm build && pnpm test`）。
+- 隔离探针在 0.2.1-rc.2 上 30 条断言全通过；真实宿主 E2E 已确认 `<writing_guard_control version="2.2.0">` 进入模型上下文（会话日志中 `source={"kind":"writing-guard","form":"notice"}`）。
+
+### Docs — 文档订正（fork）
+
+- 本仓库是上游 2.0.2 的 fork，**只在 DSH 0.2.1-rc.2 上验证过**（peer: `@deepseek-ai/dsh-tools` / `@deepseek-ai/dsh-llm` `^0.2.1-rc.2`、`@deepseek-ai/cordis` `^4.0.1`）。其他 DSH 版本未验证。
+- 本 fork **不发布 npm 包**；npm 上的 `dsh-plugin-writing-guard` 是上游原版，安装说明改成本仓库的 git tag / release ZIP 目录安装。
+- 修正文档中不准确的说法：`postinstall` **只探测、不安装** `python-docx`；`state.json` 里除指纹外还存**论文正文明文 baseline**，删掉会丢失跨轮次比对；`notes.md` 只在普通路径下不触发，`paper/notes.md` 仍会审计；同时配置 `mode` 与 `autoAuditMinSeverity` 时后者优先；`autoBrief` 不是每轮；post-execute `block` 只是不挂通知、不回滚已落盘结果；Word 编辑会对整篇文档套默认学术格式；手动工具需传绝对路径。
+
+## [2.1.0] - 2026-10-19
+
+### Changed — 适配 DeepSeek Harness 0.2.1-rc.2
+
+- `peerDependencies` 的 `@deepseek-ai/dsh-tools` / `@deepseek-ai/dsh-llm` 由 `^0.1.0-rc.6` 提升到 `^0.2.1-rc.2`。这是硬门槛：宿主插件管理器会按 `peerDependencies` 做兼容性判定，旧范围在 0.2.1-rc.2 上会被直接判为 `incompatible-version` 并拒绝加载（除非用户手动豁免）。
+- `devDependencies` 同步为精确 `0.2.1-rc.2`，`@deepseek-ai/cordis` 由 4.0.1 提到 4.0.5 以与宿主实装对齐（`peerDependencies` 仍为 `^4.0.1`）。
+- `engines.node` 由 `>=18` 提到 `>=22.19.0`，与 DSH 宿主包装器的要求一致。
+- 消息来源改用自定义 `kind: "writing-guard"`（rc.2 的 `MessageSourceMap` 已移除 catch-all 的 `plugin` kind），并在 `src/host-adapter.ts` 里通过 `declare module` 声明。
+- 版本号统一为 2.1.0：`package.json`、`PLUGIN_VERSION`（`src/rules.ts` 与 `lib/rules.js`）、`skills/writing-guard/manifest.yaml`、测试断言。
+
+### Added — `src/host-adapter.ts` 宿主边界适配层
+
+- `targetPathOf` / `resolveTarget` / `getSessionCwd`：目标文件识别覆盖 `write` / `edit` 与 dsh-ops 的 `ops_write_file` / `ops_edit_file` / `ops_replace`（含 `path` 参数），相对路径按会话当前工作目录（优先 `ctx.get("workingDirectory")`）解析为规范绝对路径，不再直接 `fs.readFile` 相对路径。
+- `executionKey`：执行键统一取自 `exec.token`（rc.2 是 branded symbol，按 symbol 身份编号），回退 `callId`，再回退目标路径。
+- `writeOutcome`：按 rc.2 的分层结果判定 `applied` / `dry-run` / `failed` / `unknown`，不再只看 `isError`，避免把 `isError: false` 且 `status: "error"` 的工具返回值当作成功写入。
+- `getSandboxPolicy` / `checkWriteAllowed`：Word 写操作在 `workspace-write` 模式下校验目标仍在政策根内，服务缺失时保持旧行为。
+
+### Fixed — 自动审计与 Word 桥的真实缺陷
+
+- **dsh-ops 写工具漏审计**：此前只识别 `write` / `edit`，`ops_write_file` / `ops_edit_file` / `ops_replace` 完全不触发审计与 preimage 快照。
+- **Word CLI 路径错位**：`PLUGIN_DIR` 用 `new URL(import.meta.url).pathname` 得到未解码的 `%20` 路径；同时 Python 资源按 `lib/word_guard/cli.py` 查找，而仓库只分发 `src/word_guard/cli.py`。现改用 `fileURLToPath`，并在 `install-extras.mjs` 与构建流程中把 Python 复制到 `lib/word_guard`。
+- **Word 审计读到 JSON 报告**：`readTextFile` 对 `.docx` 曾把 `cli.py audit` 的 JSON 输出当作正文送进规则引擎。新增 `extract` 命令（`writing_word_extract`）只取段落正文，`{'error': ...}` 业务错误按失败抛出。
+- **解释器重试会重复写操作**：`callWordGuard` 原先在任何失败上都会换下一个 Python 候选，写命令可能被执行两次。现在仅在 `ENOENT` / `EACCES`（解释器不存在）时换候选。
+- **Python 输出编码**：统一传 `PYTHONIOENCODING=utf-8` / `PYTHONUTF8=1`，避免 cp936 控制台下中文乱码。
+- **取消与超时**：Word 桥与 `readTextFile` 透传 `exec.signal`，`writing_word_edit` 的临时文件清理改为 `finally`。
+- **通知注入**：改用 `exec.deferContext`（回退 `additionalContexts`），并保留 `tools/post-execute` 的 `block` 决策语义。（**该做法在 0.2.1-rc.2 上无效，2.2.0 已修正，见上**）
+- `autoBrief` 改用有类型的 `agent.inject` 与会话工作目录，不再强转可选私有方法。
+- 默认状态文件支持 `DSH_HOME`，回退 `~/.dsh`。
+
+### Tests
+
+- All 426 tests passing (`pnpm install --ignore-scripts && pnpm build && pnpm test`)。
+- 新增第 13 节「宿主适配层」36 条断言，覆盖 `targetPathOf` / `resolveTarget` / `getSessionCwd` / `writeOutcome` / `checkWriteAllowed` / `executionKey` 的 rc.2 边界。
+- 文档中的测试数由 394 更正为 426（`394` 此前与仓库实际不符，`v2.0.2` 标签本身只有 390 条断言，本次新增 36 条）。
 ## [2.0.2] - 2026-10-05
 
 ### Changed — Word Guard 同步至 word-guard v1.1.0
