@@ -10,6 +10,62 @@ aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > [xmutfyh/dsh-plugin-writing-guard](https://github.com/xmutfyh/dsh-plugin-writing-guard)，
 > 由本 fork 原样继承；本 fork 新增的条目会在标题里标注「fork」。
 
+## [2.3.0] - 2026-10-20
+
+### Changed — GitHub URL 安装成为一等安装方式（fork）
+
+2.3.0 起，**推荐安装方式变成「插件扩展页 → 添加插件 → 填 GitHub 仓库 URL」**：`https://github.com/Promise4ever/dsh-plugin-writing-guard`；CLI 等价形式为 `dsh plugin --profile <profile> add https://github.com/Promise4ever/dsh-plugin-writing-guard`。
+
+- 这条路径**零交互**：不需要手改 profile 的 `pnpm-workspace.yaml`，不需要 `allowBuilds` 批准，也不需要本地 build——`lib/`（含 `lib/word_guard/*.py`）作为构建产物入库，git 安装直接可用。
+- 目录形态（`file:<绝对目录>`，来自 release ZIP 或 `git clone` + `git checkout v2.3.0`）保留为离线 / 钉版本时的备选路线。
+- 版本号同步点 2.2.0 → 2.3.0：`package.json:3`、`PLUGIN_VERSION`（`src/rules.ts:53` / `lib/rules.js:26`）、`skills/writing-guard/manifest.yaml:2`，以及 `tests/run-tests.mjs:1671` 断言的 `profileVersion`。
+
+### Removed — `postinstall` 与安装期写 `DSH_HOME`（fork）
+
+- 删除 `package.json` 的 `postinstall` 入口与 `scripts/install-extras.mjs`。该脚本原本做三件事：把 `skills/writing-guard` 复制到 `$DSH_HOME/skills/writing-guard`、把 `src/word_guard` 镜像到包内 `lib/word_guard`、探测 `python-docx` 并打印提示（只探测，从不安装）。
+- 因此 **2.3.0 的安装期不往 `DSH_HOME` 写任何文件**，安装也不再触发依赖构建脚本。
+
+### Added — 运行时 skill 自注册（fork）
+
+取代 postinstall 的复制行为：插件在 `apply()` 里通过宿主的 skill 服务注册名为 `writing-guard` 的 bundled skill，正文直接从包内 `skills/writing-guard/SKILL.md` 读取。
+
+- `src/index.ts:1063-1083` 调用 `registerWritingGuardSkill(ctx, resolveSkillSource(PLUGIN_DIR))`，随后 `detectLegacySkillDir()` 命中旧副本时打一条 warn。
+- `src/skill-provider.ts` 实现 provider：`SKILL_NAME` / `SKILL_PROVIDER_NAME` 均为 `writing-guard`（`src/skill-provider.ts:32`、`:34`），`BUNDLED_SKILL_RANK = 600`（`:36`）；`buildSkillCandidate`（`:146-164`）产出 `source: 'bundled'`（`:159`）、`resourceBase: { kind: 'directory', path: source.skillDir }`（`:160`）、`rank: BUNDLED_SKILL_RANK`（`:161`）；`parseSkillFrontmatter`（`:121`）与 `dsh-skill-filesystem` 的 frontmatter 语义对齐；`registerWritingGuardSkill`（`:254-279`）在 `:271` 调宿主 `@deepseek-ai/dsh-skill` 的 `registerProvider`。
+- skills 服务用 `ctx.get('skills')` **软取**，不写进 `inject`：Cordis 的 `inject` 是硬依赖，宿主缺该服务时整个插件都不会加载，13 个工具会一起消失。取不到、或注册抛错时只 warn，其余功能照常。
+- 删除 `postinstall` 后安装期不再探测 `python-docx`：缺依赖时，8 个 `writing_word_*` 工具与对 `.docx` 调用的 `writing_audit` 在调用时报错并提示 `pip install python-docx`。
+
+### Migration — 从 2.2.0 升级必须先删掉旧的 skill 副本（fork）
+
+2.2.0 的 postinstall 留在 `$DSH_HOME/skills/writing-guard/`（默认 `~/.dsh/skills/writing-guard`）的副本必须手动删除：它走 filesystem skill provider，`rank = 400`（`@deepseek-ai/dsh-skill-filesystem/lib/index.js:23`），小于插件自注册的 `rank = 600`，同一层同名时 rank 小的先赢，结果是旧正文压掉新条目（宿主还会打一条 "ignored because a higher-priority skill already exists"，`@deepseek-ai/dsh-skill/lib/index.js:320`）。插件只告警、不代删。
+
+```bat
+:: Windows（cmd）
+rmdir /s /q "%USERPROFILE%\.dsh\skills\writing-guard"
+```
+
+```bash
+# Git Bash / macOS / Linux
+rm -rf ~/.dsh/skills/writing-guard
+```
+
+> `state.json` 不在此列，**不要删**：它在 `$DSH_HOME/plugins/dsh-plugin-writing-guard/state.json`，除指纹外还存论文正文明文 baseline，删掉会失去跨轮次的修改前/后比对。
+
+### Why — 为什么去掉 postinstall（fork）
+
+pnpm 11 默认 `strict-dep-builds = true`，任何依赖的构建脚本（含 `postinstall`）都会被拦下，`pnpm add` 以 `ERR_PNPM_IGNORED_BUILDS` 失败并进入「待批准构建」流程——DSH 插件扩展页的 Git URL 安装也会卡在这一步。更麻烦的是 git 依赖的 `allowBuilds` 键是 codeload tarball URL，**每个 commit 都会变一次**，等于每次更新都要重新批准。删掉 postinstall、把 skill 复制改成运行时自注册之后，GitHub URL 安装不再触发任何构建脚本。
+
+### Tests
+
+- `tests/run-tests.mjs:2590` 新增第 14 节「skill 自注册」，27 条断言覆盖：frontmatter 解析（含 `disable-model-invocation` / `user-invocable`、CRLF、非法 name 拒绝）、candidate 的 `source`/`rank`/`resourceBase`/invocation、definition 不带 `rank`/`locator`、provider 名不是保留名 `runtime`、`SKILL.md` 只读一次并缓存、缺 skills 服务时 warn 而不抛、`ctx.get` 抛错时容忍、`registerProvider` 失败时容忍、legacy 目录的推导与检测、`resolveSkillSource` 相对 `lib/` 定位到包内 `skills/writing-guard/SKILL.md`。
+- 版本断言同步为 2.3.0。
+- 全量测试：`node tests/run-tests.mjs` 459 通过 / 0 失败（2.2.0 是 432，差 27 条即第 14 节）。
+
+### Docs — v2.3.0 安装叙事重写（fork）
+
+- 新增根目录 `INSTALL.md`：三种安装方式（GitHub URL 推荐 / release ZIP 目录 / git clone 目录）、从 2.2.0 升级的迁移步骤、验证清单、卸载、限制。
+- `README.md` / `README.en.md` / `USAGE.md` 的安装段落改为「GitHub URL 为主、目录为离线备选」，并补上「升级先删旧 skill 副本」；`ERR_PNPM_IGNORED_BUILDS` 小节改写为「2.3.0 已删除 postinstall，正常不需要批准」；`.tgz` 警告保留原有范围（仅本地 `file:*.tgz` 在带孤儿插件清理的 Desktop 构建上）。
+- `SECURITY.md` 版本号与 Supported versions 表更新到 2.3.x，并补一条「安装期 footprint」说明。
+
 ## [2.2.0] - 2026-10-20
 
 ### Fixed — 控制通知在 rc.2 上被静默丢弃（关键回归）

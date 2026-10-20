@@ -42,6 +42,11 @@ import {
   targetPathOf,
   writeOutcome,
 } from './host-adapter.ts'
+import {
+  detectLegacySkillDir,
+  registerWritingGuardSkill,
+  resolveSkillSource,
+} from './skill-provider.ts'
 
 export const name = 'dsh-plugin-writing-guard'
 
@@ -1055,6 +1060,28 @@ export function apply(ctx: Context, config: Partial<Config> = {}): void {
     },
   }))
 
+  // ---------- skill 自注册（v2.3.0） ----------
+
+  // v2.3.0：postinstall 已删除（它会触发 pnpm 的 ERR_PNPM_IGNORED_BUILDS，导致
+  // 插件扩展页的 Git URL 安装必须先人工批准构建脚本）。skill 改为运行时自注册：
+  // 正文直接从包内 skills/writing-guard/SKILL.md 读取，安装期不写 DSH_HOME。
+  // 这里用 ctx.get 软取 skills 服务，**不要**把 'skills' 加进 inject——
+  // Cordis 的 inject 是硬依赖，缺服务时整个插件都不会加载（13 个工具会一起消失）。
+  const skillRegistered = registerWritingGuardSkill(
+    ctx as unknown as { get?: (name: string) => unknown; logger?: { warn: (message: string) => void } },
+    resolveSkillSource(PLUGIN_DIR),
+  )
+  if (skillRegistered) {
+    // 2.2.0 及以前的 postinstall 会在 DSH_HOME/skills/writing-guard 留一份副本，
+    // 那份走 filesystem provider（rank 400）会压掉这里的 bundled 条目（rank 600）。
+    const legacy = detectLegacySkillDir()
+    if (legacy) {
+      ctx.logger.warn(
+        `dsh-plugin-writing-guard: 检测到旧版安装残留的 skill 副本 ${legacy}，它优先级更高会覆盖插件自带的 skill；请删除该目录后重启（插件其余功能不受影响）`,
+      )
+    }
+  }
+
   // ---------- 自动审计：论文文件写入后自动检查并注入结果 ----------
 
   if (cfg.autoAuditOnWrite) {
@@ -1176,7 +1203,8 @@ export function apply(ctx: Context, config: Partial<Config> = {}): void {
               content: [{ type: 'text', text: `【dsh-plugin-writing-guard】"${target}" 写作纪律问题已全部清零 ✅` }],
               source: NOTICE_SOURCE,
             })
-            // v2.1：优先 exec.deferContext（被外层 block 时宿主自动丢弃），回退 additionalContexts
+            // v2.2：必须走 decision.additionalContexts——dispatchScheduledExecution 在
+            // postExecute 之前就把 deferred 队列合并进结果了，此处再 deferContext 会静默丢失
             return attachContext(exec, decision, notice)
           }
           return decision // 部分解决、无新增：安静等待下次 added 汇总

@@ -2,14 +2,15 @@
 
 This repository is a fork of
 [xmutfyh/dsh-plugin-writing-guard](https://github.com/xmutfyh/dsh-plugin-writing-guard).
-The fork adapts upstream 2.0.2 to **DSH 0.2.1-rc.2**, released here as **2.2.0**; it has been tested
+The fork adapts upstream 2.0.2 to **DSH 0.2.1-rc.2**, released here as **2.3.0**; it has been tested
 **only** on DSH 0.2.1-rc.2.
 
 ## Supported versions
 
 | Version | Supported |
 |---|---|
-| 2.2.x (this fork) | ✅ — only on DSH 0.2.1-rc.2 |
+| 2.3.x (this fork) | ✅ — only on DSH 0.2.1-rc.2 |
+| 2.2.x (this fork) | ⚠️ upgrade to 2.3.x — 2.2.0's `postinstall` left a skill copy in `$DSH_HOME/skills/` |
 | 2.0.x (upstream) | upstream only — see the upstream repository |
 | 1.9.x (upstream) | upstream only (maintenance) |
 | 1.8.x (upstream) | upstream only (maintenance) |
@@ -58,6 +59,12 @@ the issue is disclosed after the fix is out.
   **plaintext baselines of the paper text** so the next write can be compared against the previous version.
   Caps: 20 files, 512 KB per file, 4 MB total, pruned by timestamp. Deleting the file discards those
   baselines and therefore cross-run comparison; a running host may write cached state back, so stop it first.
+- **Install-time footprint.** 2.3.0 removed `postinstall` and `scripts/install-extras.mjs`: installing the
+  plugin no longer writes anything into `DSH_HOME` (no skill copy, no `lib/` mirroring). The `writing-guard`
+  skill is registered at runtime from `skills/writing-guard/SKILL.md` inside the installed package. A skill
+  directory left behind by a 2.2.0 install (`$DSH_HOME/skills/writing-guard/`) is only warned about, never
+  deleted — and because a filesystem-provided skill outranks the bundled one, that stale copy keeps being
+  served until you remove it.
 - **The auto-audit is context injection, not a sandbox.** The write-boundary check in
   `src/host-adapter.ts` is a best-effort compatibility heuristic over the host's sandbox policy: it does a
   lexical path-boundary comparison (`path.resolve` + `path.relative`), does not resolve symlinks or

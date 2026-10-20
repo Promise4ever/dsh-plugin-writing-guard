@@ -1,4 +1,4 @@
-# Writing Guard 使用说明（v2.2.0）
+# Writing Guard 使用说明（v2.3.0）
 
 面向「已经装好插件」的用户。插件随宿主启动自动加载，核心能力是**在你写论文类文件时自动做写作纪律审计**，外加 13 个可手动调用的审计/Word 工具。
 
@@ -63,7 +63,7 @@ dsh --profile <profile> "用 writing_audit 检查 D:/papers/manuscript.md"
 启用后（`autoAuditOnWrite`，默认 **开**），当你用 `write` / `edit` / `ops_write_file` / `ops_edit_file` / `ops_replace` 写入一个「论文类文件」时，插件会在工具返回结果后追加一段控制块：
 
 ```
-<writing_guard_control version="2.2.0" target="...\manuscript.md">
+<writing_guard_control version="2.3.0" target="...\manuscript.md">
 CONTROL METADATA ONLY. Do not quote, paraphrase, or transfer wording ...
 added=4; resolved=0; remaining=4
 
@@ -127,8 +127,8 @@ finding rule=we-do-not-claim; severity=high; kind=candidate; action=TIGHTEN; par
 ### Word 工具（需要 Python + python-docx）
 
 **Python 是所有 DOCX 操作的硬依赖**：8 个 `writing_word_*` 工具，**以及**对 `.docx` 调用 `writing_audit` 都需要。
-`.md` / `.tex` / `.txt` 的审计不经过 Python。插件不会自动安装 `python-docx`，缺它时这些工具直接报错，
-`postinstall` 只会探测并打印一条 `pip install python-docx` 的提示。
+`.md` / `.tex` / `.txt` 的审计不经过 Python。插件不会自动安装 `python-docx`，缺它时这些工具直接报错。
+2.3.0 删掉了 `postinstall`，安装期连探测都不做，缺依赖只会在调用时以错误形式暴露出来。
 
 | 工具 | 主要参数 | 用途 |
 | --- | --- | --- |
@@ -196,45 +196,92 @@ Word 编辑推荐顺序：`scan` → `edit` → `scope_check` → `package_valid
 
 本 fork **没有发布 npm 包**；npm 上的 `dsh-plugin-writing-guard` 是上游原版，不含 rc.2 适配。
 
-**唯一推荐形态：目录安装（`file:<绝对目录>`）**，目录里直接有 `package.json`。两种拿目录的方式：
-
-1. `git clone https://github.com/Promise4ever/dsh-plugin-writing-guard.git` → `git checkout v2.2.0`
-2. 下载 release ZIP，解压到一个**固定**目录
+**2.3.0 的主要安装方式：直接用 GitHub 仓库 URL 装。**
 
 ```bash
-# 安装（<profile> 换成你自己的）
-dsh plugin --profile <profile> add "file:D:/path/to/dsh-plugin-writing-guard"
+# 推荐：插件扩展页 → 添加插件 → 输入下面这个地址
+# https://github.com/Promise4ever/dsh-plugin-writing-guard
 
-# 重启宿主让 patch 层生效
+# 或者用 CLI（<profile> 换成你自己的）
+dsh plugin --profile <profile> add https://github.com/Promise4ever/dsh-plugin-writing-guard
+
+# 重启宿主让 patch 层生效（没有 hmr 的宿主会提示 restart-required）
 dsh web
 
 # 卸载
 dsh plugin --profile <profile> remove dsh-plugin-writing-guard
 ```
 
-> 装好后**不要移动或删除**这个目录：`file:` 依赖直接指向它，移走了就失效。
+为什么 URL 安装是首选：`lib/`（含 `lib/word_guard/*.py`）是入库的构建产物，git 安装不需要 build；
+2.3.0 删掉了 `postinstall`，所以不会有构建脚本等 pnpm 批准；skill 改由插件在运行时自注册。
+**不需要手改 `pnpm-workspace.yaml`，不需要 `allowBuilds`。**
+URL 跟的是仓库默认分支，需要钉版本时用下面的目录形态。
 
-**报 `ERR_PNPM_IGNORED_BUILDS` 时**：pnpm 默认拦依赖的构建脚本（本插件的 `postinstall` 要装 skill、复制 Python 资源）。
-把 **pnpm 原样打印的那个键**抄到 profile 的 `pnpm-workspace.yaml`，然后重跑：
+离线、或需要钉版本时，用目录安装（`file:<绝对目录>`，目录里直接有 `package.json`）。两种拿目录的方式：
+
+1. 下载 release ZIP，解压到一个**固定**目录（v2.3.0 的 ZIP：
+   <https://github.com/Promise4ever/dsh-plugin-writing-guard/releases/tag/v2.3.0>）
+2. `git clone https://github.com/Promise4ever/dsh-plugin-writing-guard.git` → `git checkout v2.3.0`
+
+```bash
+dsh plugin --profile <profile> add "file:D:/path/to/dsh-plugin-writing-guard"
+dsh web
+```
+
+> 目录形态装好后**不要移动或删除**这个目录：`file:` 依赖直接指向它，移走了就失效。
+
+### 从 2.2.0 升级：先删掉旧的 skill 副本
+
+2.2.0 的 `postinstall` 会把 skill 复制到 `$DSH_HOME/skills/writing-guard/`（默认 `~/.dsh/skills/writing-guard`）。
+2.3.0 不再往那里写，但旧副本会留在原地：它来自 filesystem skill provider（rank 400），优先级高于插件自注册的
+bundled skill（rank 600），同名时旧副本会压掉插件自带的条目。**必须手动删掉它**，插件只会在检测到残留时打一条警告，
+不会替你删：
+
+```bat
+:: Windows（cmd）
+rmdir /s /q "%USERPROFILE%\.dsh\skills\writing-guard"
+```
+
+```bash
+# Git Bash / macOS / Linux
+rm -rf ~/.dsh/skills/writing-guard
+```
+
+自定义了 `DSH_HOME` 的，路径换成 `$DSH_HOME/skills/writing-guard`。然后重新安装/更新插件并重启宿主。
+
+### 关于 `ERR_PNPM_IGNORED_BUILDS`
+
+**2.3.0 已删除 `postinstall`，正常安装不会遇到这个错误，也不需要任何构建批准。** 只会在两种情况下撞见：
+装 2.2.0 及更早的版本，或者用本地 `.tgz` 这类非推荐形态。
+
+真遇到时，把 **pnpm 原样打印的那个键**抄到 profile 的 `pnpm-workspace.yaml`，然后重跑：
 
 ```yaml
 allowBuilds:
   dsh-plugin-writing-guard: true
 ```
 
-**关于 tarball 的准确说法**：`dsh plugin add <某路径>.tgz` 能装成功，但在**带孤儿插件清理行为的 DSH Desktop 构建**上，
+注意 git 依赖的 allowBuilds 键是 codeload tarball URL，每个 commit 都会变一次——这正是 2.3.0 删掉 `postinstall` 的原因。
+
+### 关于 tarball 的准确说法
+
+`dsh plugin add <某路径>.tgz` 能装成功，但在**带孤儿插件清理行为的 DSH Desktop 构建**上，
 桌面壳启动时会把「`file:`/`link:` 依赖且目标不是目录」的插件当悬挂依赖静默卸载（判据 `is_dir()`，tgz 是文件恒为 false），
 表现为「装完能用，重启后插件列表里就没了」。范围仅限**本地 `file:*.tgz`** 装在这类构建上；
-目录形态不受影响。registry / HTTPS tarball 安装、纯 CLI profile 的情况**没有被证实**有问题，不要一概而论。
+目录形态与 GitHub URL 安装不受影响。registry / HTTPS tarball 安装、纯 CLI profile 的情况**没有被证实**有问题，不要一概而论。
 
-安装后 `postinstall` 会做三件事，但**都只在本机写文件，不装 Python 包**：
+### 安装期不再写 DSH_HOME
 
-1. 把 skill 复制到 `$DSH_HOME/skills/writing-guard/`（无 `DSH_HOME` 时回退 `~/.dsh/skills/`）；
-2. 把 Python 资源从 `src/word_guard` 复制到已安装包内的 `lib/word_guard`；
-3. 探测 `python-docx`（跑 `python -c "import docx"`），**只打印 `pip install python-docx` 的提示，从不代为安装**。
+**2.3.0 的安装期不往 `DSH_HOME` 写任何文件。** skill 不再靠 `postinstall` 复制，而是插件在 `apply()` 里
+通过宿主的 skill 服务自注册（`ctx.get('skills')` → `registerProvider`，来源标记 `bundled`、rank 600，
+正文读包内的 `skills/writing-guard/SKILL.md`）。宿主没有提供 skill 服务时只打警告，不影响 13 个工具。
 
-缺 `python-docx` 时，所有 DOCX 相关操作（8 个 `writing_word_*` 工具 + 对 `.docx` 调 `writing_audit`）会报错；
-对 `.md` / `.tex` / `.txt` 的审计不受影响。
+`lib/word_guard` 也不再由安装脚本从 `src/word_guard` 复制：它作为构建产物直接入库，git 安装即可用。
+
+缺 `python-docx` 时，所有 DOCX 相关操作（8 个 `writing_word_*` 工具 + 对 `.docx` 调 `writing_audit`）会在调用时报错；
+对 `.md` / `.tex` / `.txt` 的审计不受影响。装依赖：`pip install python-docx`（需要 Python 3.10+）。
+
+完整安装、升级、验证清单与卸载细节见 [INSTALL.md](INSTALL.md)。
 
 ---
 

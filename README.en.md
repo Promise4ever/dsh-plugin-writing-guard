@@ -7,10 +7,11 @@
 > The npm package named `dsh-plugin-writing-guard` is the **upstream** build, not this adapted fork —
 > this fork publishes no npm package and has no CI of its own.
 >
-> This fork adapts upstream 2.0.2 to **DSH 0.2.1-rc.2** (version 2.2.0, tag `v2.2.0`) and has been
+> This fork adapts upstream 2.0.2 to **DSH 0.2.1-rc.2** (version 2.3.0, tag `v2.3.0`) and has been
 > **tested only on DSH 0.2.1-rc.2**; other versions are unverified. Changes vs upstream: host adaptation
 > (rc.2 peer ranges, message-source kind, tool-result protocol, Word Python paths), the regression fix for
-> control notices being silently dropped on rc.2, and corrected docs/install instructions.
+> control notices being silently dropped on rc.2, runtime skill self-registration (no install-time writes to
+> `DSH_HOME`) with the GitHub URL as the primary install route, and corrected docs/install instructions.
 > Rules, rule corpus and test suite come from upstream — see [Credits](#credits) and [License](#license).
 
 **Less explanation. More argument. Preserve the science.**
@@ -68,18 +69,18 @@ Prefer: Normalization parameters were estimated from the training data.
 ## Quick Start
 
 ```sh
-# 1) Get the plugin as a DIRECTORY (see Full install below for both routes)
+# 1) Install straight from the GitHub URL (the primary route in 2.3.0 — no build approval needed)
+dsh plugin --profile <profile> add https://github.com/Promise4ever/dsh-plugin-writing-guard
 
-# 2) Install that directory (absolute path, the folder that holds package.json)
-dsh plugin --profile <profile> add "file:D:/path/to/dsh-plugin-writing-guard"
-
-# 3) Restart the host so the patch layer loads
+# 2) Restart the host so the patch layer loads
 dsh web
 ```
 
+Offline, or when you need the version pinned, install a directory with `file:` instead — see
+[Full install](#full-install) for both directory routes.
+
 This fork is **not published on npm**. `dsh plugin add dsh-plugin-writing-guard` resolves to the
-upstream package, which does not contain the rc.2 adaptation. Use the git tag / release ZIP instead —
-see [Full install](#full-install).
+upstream package, which does not contain the rc.2 adaptation. Use the GitHub URL, git tag or release ZIP.
 
 ---
 
@@ -186,26 +187,36 @@ The plugin listens to `tools/post-execute`: when the agent writes/edits paper fi
 
 ## Full install
 
-**Only one form survives long-term: install the plugin as a directory (`file:<absolute directory>`).**
+**The primary route in 2.3.0 is the GitHub repository URL.** 2.3.0 removed `postinstall` and registers the
+skill at runtime instead, so installing writes nothing into `DSH_HOME` and needs no `pnpm-workspace.yaml`
+edit and no `allowBuilds` approval.
 
-### Route A — git clone + checkout the tag
+A directory install (`file:<absolute directory>`) remains the offline / pinned-version alternative.
 
-```sh
-git clone https://github.com/Promise4ever/dsh-plugin-writing-guard.git
-cd dsh-plugin-writing-guard
-git checkout v2.2.0
+See **[INSTALL.md](INSTALL.md)** for the full install / upgrade / uninstall / verification checklist.
 
-dsh plugin --profile <profile> add "file:D:/path/to/dsh-plugin-writing-guard"
-dsh web
+### Route 1 (recommended) — GitHub repository URL
+
+In the DSH plugin page: **Add plugin** → install source:
+
+```text
+https://github.com/Promise4ever/dsh-plugin-writing-guard
 ```
 
-The cloned folder *is* the plugin directory (it contains `package.json`). **Do not move or delete it
-afterwards** — the `file:` dependency points at it.
+or from the CLI:
 
-### Route B — release ZIP unpacked to a permanent directory
+```sh
+dsh plugin --profile <profile> add https://github.com/Promise4ever/dsh-plugin-writing-guard
+dsh web   # restart the host so the patch layer loads
+```
 
-Download the v2.2.0 ZIP from
-[Releases](https://github.com/Promise4ever/dsh-plugin-writing-guard/releases/tag/v2.2.0), unpack it to a
+`lib/` (including `lib/word_guard/*.py`) is committed build output, so a git install needs no build step.
+The URL tracks the repository's default branch; use a directory route when you need a pinned version.
+
+### Route 2 — release ZIP unpacked to a permanent directory (offline)
+
+Download the v2.3.0 ZIP from
+[Releases](https://github.com/Promise4ever/dsh-plugin-writing-guard/releases/tag/v2.3.0), unpack it to a
 stable directory (e.g. `D:/plugins/dsh-plugin-writing-guard`), then install that directory:
 
 ```sh
@@ -213,28 +224,64 @@ dsh plugin --profile <profile> add "file:D:/plugins/dsh-plugin-writing-guard"
 dsh web
 ```
 
+### Route 3 — git clone + checkout the tag
+
+```sh
+git clone https://github.com/Promise4ever/dsh-plugin-writing-guard.git
+cd dsh-plugin-writing-guard
+git checkout v2.3.0
+
+dsh plugin --profile <profile> add "file:D:/path/to/dsh-plugin-writing-guard"
+dsh web
+```
+
+The cloned / unpacked folder *is* the plugin directory (it contains `package.json`). For routes 2 and 3,
+**do not move or delete it afterwards** — the `file:` dependency points at it.
+
+### Upgrading from 2.2.0 — delete the old skill copy first
+
+2.2.0's `postinstall` copied the skill to `$DSH_HOME/skills/writing-guard/` (default
+`~/.dsh/skills/writing-guard`). 2.3.0 no longer writes there, but the leftover copy stays: it comes from the
+filesystem provider (rank 400) and outranks the plugin's self-registered bundled skill (rank 600), so you keep
+seeing the old skill body. The plugin warns about the leftover but **will not delete it for you**:
+
+```bat
+:: Windows (cmd)
+rmdir /s /q "%USERPROFILE%\.dsh\skills\writing-guard"
+```
+
+```sh
+# Git Bash / macOS / Linux
+rm -rf ~/.dsh/skills/writing-guard
+```
+
+Then reinstall/update the plugin and restart the host. With a custom `DSH_HOME`, use
+`$DSH_HOME/skills/writing-guard`.
+
 ### If you hit `ERR_PNPM_IGNORED_BUILDS`
 
-pnpm blocks dependency build scripts by default; this plugin's `postinstall` installs the skill and copies
-the Python resources. Copy **the exact key pnpm printed** (usually `dsh-plugin-writing-guard`) into the
-profile's `pnpm-workspace.yaml`:
+**2.3.0 removed `postinstall`, so a normal install never hits this and needs no build approval.**
+You only see it when installing 2.2.0 or earlier, or when using a non-recommended form such as a local `.tgz`.
+
+In that case copy **the exact key pnpm printed** into the profile's `pnpm-workspace.yaml`:
 
 ```yaml
 allowBuilds:
   dsh-plugin-writing-guard: true
 ```
 
-Then re-run the same `dsh plugin ... add` command. Do not invent the key name.
+Then re-run the same `dsh plugin ... add` command. Do not invent the key name — for git dependencies the key
+is the codeload tarball URL, which changes with every commit; that is exactly why 2.3.0 dropped `postinstall`.
 
 ### ⚠️ Do not install a local `.tgz`
 
-`dsh plugin add <some-pot>.tgz` installs fine, but on **DSH Desktop builds that run the orphan-plugin
+`dsh plugin add <some-path>.tgz` installs fine, but on **DSH Desktop builds that run the orphan-plugin
 cleanup at startup**, a `file:`/`link:` dependency whose target is not a directory is treated as dangling
 and silently uninstalled (the test is `is_dir()`; a tarball is a file, so it always fails). Symptom:
 it works after install and is gone from the plugin list after a restart.
 
 - Scope: **local `file:*.tgz` installs on those Desktop builds**.
-- Directory installs (`file:<directory>`) are not affected — that is why both routes above use a directory.
+- Directory installs (`file:<directory>`) are not affected, and neither is the GitHub URL install.
 - Registry installs, HTTPS-tarball installs and plain CLI profiles are **not proven** to be broken by this;
   do not generalise the warning.
 
@@ -245,7 +292,8 @@ it works after install and is gone from the plugin list after a restart.
 - Node.js ≥ 22.19.0 (DSH 0.2.1 runtime requirement).
 - Python 3.10+ with `python-docx` (`pip install python-docx`) for **every DOCX operation** — the eight
   `writing_word_*` tools *and* `writing_audit` called on a `.docx`. The plugin **does not install it**;
-  `postinstall` only probes for it and prints a hint. `.md` / `.tex` / `.txt` audits need no Python.
+  2.3.0 has no `postinstall`, so there is not even an install-time probe — the tools fail with a hint when the
+  dependency is missing. `.md` / `.tex` / `.txt` audits need no Python.
 
 Repository: https://github.com/Promise4ever/dsh-plugin-writing-guard
 
@@ -284,7 +332,7 @@ Repository: https://github.com/Promise4ever/dsh-plugin-writing-guard
 npm test
 ```
 
-432 deterministic TP / TN / boundary / regression tests covering:
+459 deterministic TP / TN / boundary / regression tests (27 of them are the v2.3.0 skill self-registration regressions) covering:
 
 - STYLE, Scholarship Lock, Epistemic Lock
 - Claim alignment, local citation integrity

@@ -7,6 +7,7 @@
 import { auditText, detectDocumentProfile, filterReport, hitFingerprint, diffAudit, serializeFingerprints, deserializeFingerprints, diffScholarship, computeStyleProfile, computeJournalProfile, computeJournalProfileFromDocuments, auditJournalFit, detectRhetoricalMoves, splitSentences, cosineSimilarity, tokenizeForSimilarity, extractEpistemicMarkers, diffEpistemic, alignSentences, formatReport, extractClaimSpans, simTier, analyzeParagraphRhythm, analyzeSentenceRhythm, scaffoldSignature, findRepeatedScaffolds, findPunctuationOverloads, findCoinedFrameworks, findGenericClaims, parseBibText, checkCitationIntegrity } from '../lib/rules.js'
 import { isPaperFile, baselineByteSize, pruneBaselines, buildAutoAuditControl, attachContext } from '../lib/index.js'
 import { targetPathOf, resolveTarget, getSessionCwd, writeOutcome, checkWriteAllowed, executionKey } from '../lib/host-adapter.js'
+import { splitFrontmatter, parseSkillFrontmatter, buildSkillCandidate, buildSkillDefinition, createWritingGuardSkillProvider, resolveSkillSource, registerWritingGuardSkill, detectLegacySkillDir, dshHomeOf, legacySkillDir, SKILL_PROVIDER_NAME, BUNDLED_SKILL_RANK } from '../lib/skill-provider.js'
 import fs from 'node:fs'
 import path from 'node:path'
 
@@ -1667,7 +1668,7 @@ console.log('=== 89. v1.4 Journal Profile 蒸馏（computeJournalProfile）===')
     'Our findings suggest that temperature is a key control. The observed increase may be related to enhanced vapor transport. Further studies should examine pore-scale salt precipitation.',
   ].join('\n')
   const profile = computeJournalProfile(corpus, { journal: 'Test Journal', articleType: 'research-article' })
-  check('journal profile metadata', profile.metadata.journal === 'Test Journal' && profile.metadata.profileVersion === '2.2.0' && profile.structure.sections.length >= 4)
+  check('journal profile metadata', profile.metadata.journal === 'Test Journal' && profile.metadata.profileVersion === '2.3.0' && profile.structure.sections.length >= 4)
   check('journal profile has sentence distribution', !!profile.sentenceStyle.sentenceLength && profile.sentenceStyle.sentenceLength.count > 0)
   check('journal profile has section details', profile.structure.sections.some((s) => s.name === 'results' && s.sentenceLength.count > 0))
   check('journal profile preserves only statistics', !JSON.stringify(profile).includes('This study investigates'))
@@ -2586,6 +2587,97 @@ console.log('=== 13. 宿主适配层（host-adapter，rc.2 边界） ===')
   check('adapter: attachContext preserves existing contexts', prior.additionalContexts.length === 2)
   check('adapter: attachContext tolerates missing exec', attachContext(undefined, { kind: 'accept' }, notice).additionalContexts.length === 1)
 }
+console.log('=== 14. skill 自注册（v2.3.0，去掉 postinstall 后的替代路径）===')
+
+const SAMPLE_SKILL = [
+  '---',
+  'name: writing-guard',
+  'description: "Audit scientific manuscripts."',
+  '---',
+  '',
+  '# Writing Guard',
+  '',
+  'Body text.',
+].join('\n')
+
+{
+  // frontmatter 语义必须与 dsh-skill-filesystem 的 parseSkillFile 对齐
+  const parsed = parseSkillFrontmatter(SAMPLE_SKILL)
+  check('skill: parses frontmatter name/description', parsed !== null && parsed.frontmatter.name === 'writing-guard' && parsed.frontmatter.description === 'Audit scientific manuscripts.')
+  check('skill: strips frontmatter from content', parsed !== null && !parsed.content.includes('---') && parsed.content.startsWith('# Writing Guard'))
+  check('skill: defaults modelInvocable/userInvocable to true', parsed !== null && parsed.frontmatter.modelInvocable === true && parsed.frontmatter.userInvocable === true)
+
+  const restricted = parseSkillFrontmatter(['---', 'name: writing-guard', 'description: x', 'disable-model-invocation: true', 'user-invocable: false', '---', 'body'].join('\n'))
+  check('skill: honours disable-model-invocation/user-invocable', restricted !== null && restricted.frontmatter.modelInvocable === false && restricted.frontmatter.userInvocable === false)
+
+  check('skill: rejects frontmatter without description', parseSkillFrontmatter(['---', 'name: writing-guard', '---', 'body'].join('\n')) === null)
+  check('skill: rejects non-kebab name', parseSkillFrontmatter(['---', 'name: Writing Guard', 'description: x', '---', 'body'].join('\n')) === null)
+  check('skill: rejects plain markdown without frontmatter', parseSkillFrontmatter('# no frontmatter\n') === null)
+
+  const crlf = splitFrontmatter('---\r\nname: writing-guard\r\ndescription: "A: B"\r\n---\r\nbody')
+  check('skill: handles CRLF and quoted scalars', crlf.values.name === 'writing-guard' && crlf.values.description === 'A: B')
+
+  const source = { skillDir: '/tmp/pkg/skills/writing-guard', skillFile: '/tmp/pkg/skills/writing-guard/SKILL.md' }
+  const candidate = buildSkillCandidate(parsed.frontmatter, source)
+  check('skill: candidate provider matches provider name', candidate.provider === SKILL_PROVIDER_NAME)
+  check('skill: candidate uses bundled source and bundled rank', candidate.source === 'bundled' && candidate.rank === BUNDLED_SKILL_RANK)
+  check('skill: candidate exposes directory resourceBase', candidate.resourceBase && candidate.resourceBase.kind === 'directory' && candidate.resourceBase.path === source.skillDir)
+  check('skill: candidate carries both invocation flags', candidate.invocation && candidate.invocation.modelInvocable === true && candidate.invocation.userInvocable === true)
+
+  const definition = buildSkillDefinition(parsed.frontmatter, parsed.content, source)
+  check('skill: definition content is a string', typeof definition.content === 'string' && definition.content.length > 0)
+  check('skill: definition omits rank/locator', definition.rank === undefined && definition.locator === undefined)
+}
+
+{
+  // provider 形状：list 返回单 candidate，get 返回含 content 的 definition
+  const source = { skillDir: '/tmp/pkg/skills/writing-guard', skillFile: '/tmp/pkg/skills/writing-guard/SKILL.md' }
+  let reads = 0
+  const provider = createWritingGuardSkillProvider(source, { readFile: async () => { reads += 1; return SAMPLE_SKILL } })
+  check('skill: provider name is not the reserved runtime name', provider.name === SKILL_PROVIDER_NAME && provider.name !== 'runtime')
+  const listed = await provider.list()
+  check('skill: list returns a single candidate', Array.isArray(listed) && listed.length === 1 && listed[0].name === 'writing-guard')
+  const fetched = await provider.get(listed[0])
+  check('skill: get returns definition with content', Boolean(fetched) && typeof fetched.content === 'string' && fetched.content.includes('Body text.'))
+  await provider.get(listed[0])
+  check('skill: SKILL.md is read once and cached', reads === 1)
+}
+
+{
+  // 注册：无 skills 服务时只 warn 不抛（插件其余功能必须继续可用）
+  const warnings = []
+  const ok = registerWritingGuardSkill({ logger: { warn: (m) => warnings.push(m) } }, { skillDir: '/x', skillFile: '/x/SKILL.md' })
+  check('skill: missing skills service returns false', ok === false)
+  check('skill: missing skills service warns instead of throwing', warnings.length === 1 && warnings[0].includes('skills'))
+
+  const throwingCtx = { get: () => { throw new Error('service not active') }, logger: { warn: () => {} } }
+  check('skill: strict get() throw is tolerated', registerWritingGuardSkill(throwingCtx, { skillDir: '/x', skillFile: '/x/SKILL.md' }) === false)
+
+  const registered = []
+  const fakeRegistry = { registerProvider: (create) => { registered.push(create()); return () => {} } }
+  const okCtx = { get: (n) => (n === 'skills' ? fakeRegistry : undefined), logger: { warn: () => {} } }
+  const done = registerWritingGuardSkill(okCtx, { skillDir: '/x', skillFile: '/x/SKILL.md' }, { readFile: async () => SAMPLE_SKILL })
+  check('skill: registers provider through host skills service', done === true && registered.length === 1 && registered[0].name === SKILL_PROVIDER_NAME)
+
+  const badRegistry = { registerProvider: () => { throw new Error('already registered') } }
+  const badWarnings = []
+  const badCtx = { get: () => badRegistry, logger: { warn: (m) => badWarnings.push(m) } }
+  check('skill: provider registration failure is tolerated', registerWritingGuardSkill(badCtx, { skillDir: '/x', skillFile: '/x/SKILL.md' }) === false && badWarnings.length === 1)
+}
+
+{
+  // 旧版 postinstall 残留检测（user-dsh rank 400 会压掉 bundled 600）
+  const home = dshHomeOf({ DSH_HOME: 'D:/dsh-home' })
+  check('skill: legacy dir derives from DSH_HOME', legacySkillDir(home) === path.join('D:/dsh-home', 'skills', 'writing-guard'))
+  check('skill: detects leftover legacy skill copy', detectLegacySkillDir(() => true, home) === legacySkillDir(home))
+  check('skill: reports absence when no legacy copy', detectLegacySkillDir(() => false, home) === null)
+  const realSource = resolveSkillSource(path.resolve('/tmp/pkg', 'lib'))
+  check(
+    'skill: bundled source resolves next to lib/',
+    realSource.skillFile === path.resolve('/tmp/pkg', 'skills', 'writing-guard', 'SKILL.md'),
+  )
+}
+
 console.log('')
 console.log(`结果：${pass} 通过 / ${fail} 失败`)
 if (fail > 0) {
