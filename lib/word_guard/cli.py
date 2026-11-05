@@ -13,8 +13,13 @@ import os
 import sys
 import json
 import copy
+import errno
 import shutil
+import tempfile
+import time
+import zipfile
 from pathlib import Path
+from dataclasses import asdict, is_dataclass
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -68,9 +73,261 @@ def _apply_default_academic_formatting(doc, include_unknown_tables=True):
         'equations': {
             'formatted_numbered': sum(1 for r in equation_results if r.get('action') == 'formatted_numbered'),
             'centered_unnumbered': sum(1 for r in equation_results if r.get('action') == 'centered_unnumbered'),
+            'skipped_inline': sum(1 for r in equation_results if r.get('action') == 'skipped_inline'),
             'details': equation_results,
         },
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Shared helpers for the editing tools
+# ═══════════════════════════════════════════════════════════════════════════
+
+# The TypeScript tool schema uses camelCase; the Python resolver uses snake_case.
+_SCOPE_KEYMAP = {
+    'startHeading': 'start_heading',
+    'endHeading': 'end_heading',
+    'heading': 'heading',
+    'startParagraph': 'start_index',
+    'endParagraph': 'end_index',
+    'start_heading': 'start_heading',
+    'end_heading': 'end_heading',
+    'start_index': 'start_index',
+    'end_index': 'end_index',
+    'level': 'level',
+    'allow_fuzzy': 'allow_fuzzy',
+}
+
+
+def _normalize_scope_config(scope_config):
+    """Map camelCase tool arguments to ``resolve_scope()`` keyword arguments.
+
+    Returns ``(config, error)``.  Unrecognized keys are rejected rather than
+    silently dropped: a typo must never degrade the edit to the whole document.
+    """
+    if not scope_config:
+        return None, None
+    if not isinstance(scope_config, dict):
+        return None, f"范围参数必须是对象，收到 {type(scope_config).__name__}"
+
+    config = {}
+    unknown = []
+    for key, value in scope_config.items():
+        mapped = _SCOPE_KEYMAP.get(key)
+        if mapped is None:
+            unknown.append(str(key))
+            continue
+        if value is not None:
+            config[mapped] = value
+    if unknown:
+        return None, f"无法识别的范围参数：{', '.join(sorted(unknown))}"
+    return (config or None), None
+
+
+def _coerce_edit_result(res):
+    """Normalize the editor return value to the current dict contract.
+
+    ``editor.replace_text_in_paragraph`` historically returned a bool in some
+    code paths; the run-aware editor now returns a dict.  Both shapes are
+    accepted so cli.py stays usable while the editor is being upgraded.
+    """
+    if isinstance(res, dict):
+        return {
+            'success': bool(res.get('success')),
+            'method': res.get('method'),
+            'warnings': list(res.get('warnings') or []),
+            'preserved_nodes': list(res.get('preserved_nodes') or []),
+            'refused_reason': res.get('refused_reason'),
+            'error': res.get('error'),
+            'old_text': res.get('old_text'),
+            'new_text': res.get('new_text'),
+            'paragraph_index': res.get('paragraph_index'),
+        }
+    return {
+        'success': bool(res),
+        'method': None,
+        'warnings': [],
+        'preserved_nodes': [],
+        'refused_reason': None,
+        'error': None,
+        'old_text': None,
+        'new_text': None,
+        'paragraph_index': None,
+    }
+
+
+def _failed_change(old_text, new_text, warning, paragraph_index=None):
+    """Build one failed replacement record in the coerced shape."""
+    return {
+        'success': False,
+        'method': None,
+        'warnings': [warning],
+        'preserved_nodes': [],
+        'refused_reason': None,
+        'error': None,
+        'old_text': old_text,
+        'new_text': new_text,
+        'paragraph_index': paragraph_index,
+    }
+
+
+def _scope_payload(scope):
+    """Serialize an EditScope for tool output (including resolution errors)."""
+    if scope is None:
+        return {}
+    return {
+        'start': scope.start_para_index,
+        'end': scope.end_para_index,
+        'heading': scope.start_heading,
+        'end_heading': scope.end_heading,
+        'ambiguous': scope.ambiguous,
+        'warnings': list(scope.warnings),
+        'error': getattr(scope, 'error', None),
+    }
+
+
+def _empty_package_validation(error=None):
+    return {
+        'valid': False,
+        'errors': [error] if error else [],
+        'warnings': [],
+        'xml_parts_checked': 0,
+        'relationships_checked': 0,
+        'orphan_media': [],
+    }
+
+
+def _empty_package_integrity():
+    return {
+        'intact': False,
+        'changed_parts': [],
+        'added_parts': [],
+        'removed_parts': [],
+        'unexpected_changed_parts': [],
+        'unexpected_added_parts': [],
+        'unexpected_removed_parts': [],
+    }
+
+
+def _failed_edit_result(error, output, replacements, scope=None,
+                        default_formatting=None, applied=0):
+    """Full result dictionary for an edit that must not touch the target."""
+    total = len(replacements or [])
+    return {
+        'success': False,
+        'complete': False,
+        'applied': applied,
+        'failed': max(0, total - applied),
+        # 没有落盘就不算改动：applied 只表示"内存里替换成功了几条"。
+        'changes': 0,
+        'total_replacements': total,
+        'output': output,
+        'saved': False,
+        'backup_path': None,
+        'restored_parts': [],
+        'error': error,
+        'scope': _scope_payload(scope),
+        'protected_elements': 0,
+        'default_formatting': default_formatting or {'applied': False, 'reason': 'mode'},
+        'package_validation': _empty_package_validation(error),
+        'package_integrity': _empty_package_integrity(),
+        'manifest_summary': '',
+    }
+
+
+def _validation_error_message(package_validation):
+    details = package_validation.get('errors') or ['未知校验错误']
+    return '包校验失败，未写入目标文件：' + '; '.join(str(e) for e in details[:3])
+
+
+def _integrity_error_message(package_integrity):
+    parts = (
+        package_integrity.get('unexpected_removed_parts')
+        or package_integrity.get('unexpected_changed_parts')
+        or package_integrity.get('unexpected_added_parts')
+        or []
+    )
+    return (
+        '包完整性校验失败，未写入目标文件：意外变更的部件 '
+        + ', '.join(parts[:5])
+    )
+
+
+def _safe_unlink(path):
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+def _replace_file(src_path, dst_path, attempts=5):
+    """Move a file onto its target, tolerating transient Windows file locks."""
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            os.replace(src_path, dst_path)
+            return
+        except OSError as exc:
+            last_error = exc
+            if getattr(exc, 'winerror', None) == 17 or exc.errno == errno.EXDEV:
+                # Target lives on another volume: fall back to a copy.
+                shutil.copyfile(src_path, dst_path)
+                _safe_unlink(src_path)
+                return
+            # Antivirus/indexers can briefly hold a fresh temp file; retry.
+            time.sleep(0.2 * (attempt + 1))
+    try:
+        shutil.copyfile(src_path, dst_path)
+        _safe_unlink(src_path)
+        return
+    except OSError:
+        raise last_error
+
+
+def _restore_missing_parts(target_path, original_path, missing_parts):
+    """Copy package parts dropped by python-docx back into the saved package.
+
+    Rewrites the ZIP with all current entries plus the missing entries read
+    from the original package.  Returns the list of restored part names.
+    """
+    with zipfile.ZipFile(original_path) as zsrc:
+        available = set(zsrc.namelist())
+        payloads = {
+            name: zsrc.read(name) for name in missing_parts if name in available
+        }
+    if not payloads:
+        return []
+
+    with zipfile.ZipFile(target_path) as zin:
+        entries = [(info, zin.read(info.filename)) for info in zin.infolist()]
+
+    tmp_out = target_path + '.restored'
+    try:
+        with zipfile.ZipFile(tmp_out, 'w', zipfile.ZIP_DEFLATED) as zout:
+            for info, data in entries:
+                zout.writestr(info, data)
+            for name, data in payloads.items():
+                zout.writestr(name, data)
+        _replace_file(tmp_out, target_path)
+    finally:
+        _safe_unlink(tmp_out)
+    return sorted(payloads)
+
+
+def _commit_file(tmp_path, target_path):
+    """Atomically move the validated temp document onto the target path."""
+    _replace_file(tmp_path, target_path)
+
+
+def _as_jsonable(value):
+    """Convert dataclass results (e.g. integrity counts) to plain JSON values."""
+    if is_dataclass(value) and not isinstance(value, type):
+        return asdict(value)
+    if isinstance(value, dict):
+        return {k: _as_jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_as_jsonable(v) for v in value]
+    return value
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -114,6 +371,7 @@ def writing_word_scan(file_path):
                 'rows': t.rows,
                 'cols': t.cols,
                 'preview': t.text_preview,
+                'equations': t.equations,
             }
             for t in info.tables
         ],
@@ -157,36 +415,31 @@ def writing_word_edit(file_path, replacements, scope_config=None,
     Returns:
         dict with edit results and change manifest
     """
+    output = output_path or file_path
+    if isinstance(replacements, dict):
+        replacements = replacements.get('replacements') or []
+    replacements = list(replacements or [])
+    total_replacements = len(replacements)
+
     if not os.path.exists(file_path):
-        return {'error': f"File not found: {file_path}"}
+        return _failed_edit_result(f"File not found: {file_path}", output, replacements)
 
-    # Preserve a package-level preimage for structural integrity comparison.
-    import tempfile
-    preimage_fd, preimage_path = tempfile.mkstemp(suffix='.docx', prefix='wg_preimage_')
-    os.close(preimage_fd)
-    shutil.copy2(file_path, preimage_path)
-
-    # Create backup if needed
-    if backup and output_path is None:
-        backup_path = file_path + '.bak'
-        shutil.copy2(file_path, backup_path)
+    scope_config, config_error = _normalize_scope_config(scope_config)
+    if config_error:
+        return _failed_edit_result(config_error, output, replacements)
 
     # Load document
     from docx import Document
-    doc = Document(file_path)
+    try:
+        doc = Document(file_path)
+    except Exception as exc:
+        return _failed_edit_result(f"无法打开 DOCX 文件：{exc}", output, replacements)
 
-    # Resolve scope
-    if scope_config:
-        scope = resolve_scope(doc.paragraphs, **scope_config)
-        if scope.ambiguous:
-            return {
-                'error': 'Ambiguous scope',
-                'warnings': scope.warnings,
-                'options': scope.ambiguity_options,
-            }
-    else:
-        # Full document scope
-        scope = resolve_scope(doc.paragraphs)
+    # Resolve scope. A half-specified range must never fall back to the whole
+    # document; the resolver reports it through scope.error.
+    scope = resolve_scope(doc.paragraphs, **(scope_config or {}))
+    if getattr(scope, 'error', None):
+        return _failed_edit_result(scope.error, output, replacements, scope=scope)
 
     # Check protected elements in scope
     protected = get_protected_elements_in_range(
@@ -202,55 +455,84 @@ def writing_word_edit(file_path, replacements, scope_config=None,
     # Apply replacements
     results = []
     for rep in replacements:
+        if not isinstance(rep, dict):
+            results.append(_failed_change('', '', '替换项格式无效，已跳过'))
+            manifest.add_change(
+                change_type='replace_text',
+                target='invalid',
+                success=False,
+                warnings=['替换项格式无效，已跳过'],
+            )
+            continue
+
         old_text = rep.get('old', '')
         new_text = rep.get('new', '')
 
         if not old_text:
+            results.append(_failed_change(old_text, new_text, '替换源文本为空，已跳过'))
+            manifest.add_change(
+                change_type='replace_text',
+                target='invalid',
+                old_text=old_text,
+                new_text=new_text,
+                success=False,
+                warnings=['替换源文本为空，已跳过'],
+            )
             continue
 
         # Search within scope
         found = False
         for idx in scope.included_paragraphs:
-            if idx < len(doc.paragraphs):
-                para = doc.paragraphs[idx]
-                if old_text in para.text:
-                    # Check complexity
-                    complexity = check_complex_paragraph(para)
+            if idx >= len(doc.paragraphs):
+                continue
+            para = doc.paragraphs[idx]
+            if old_text not in para.text:
+                continue
 
-                    if mode == 'text_only' and complexity['is_complex']:
-                        # Warn but still attempt run-aware replacement
-                        result = replace_text_in_paragraph(para, old_text, new_text, red=True)
-                        result['complexity_warning'] = (
-                            f"Paragraph at index {idx} is complex "
-                            f"({complexity['risk_level']} risk): "
-                            f"{complexity['protected_nodes']}"
-                        )
-                    else:
-                        result = replace_text_in_paragraph(para, old_text, new_text, red=True)
+            # Check complexity
+            complexity = check_complex_paragraph(para)
 
-                    result['paragraph_index'] = idx
-                    results.append(result)
+            # The editor returns a dict; adapt it so cli.py keeps working with
+            # both the old bool contract and the new run-aware contract.
+            result = _coerce_edit_result(
+                replace_text_in_paragraph(para, old_text, new_text, red=True)
+            )
+            result['paragraph_index'] = idx
+            if result.get('refused_reason'):
+                result['success'] = False
+            if mode == 'text_only' and complexity['is_complex']:
+                result['complexity_warning'] = (
+                    f"Paragraph at index {idx} is complex "
+                    f"({complexity['risk_level']} risk): "
+                    f"{complexity['protected_nodes']}"
+                )
+            results.append(result)
 
-                    # Record in manifest
-                    manifest.add_change(
-                        change_type='replace_text',
-                        target=f"paragraph {idx}",
-                        old_text=old_text,
-                        new_text=new_text,
-                        paragraph_index=idx,
-                        method=result.get('method'),
-                        success=result.get('success', False),
-                        warnings=result.get('warnings', []),
-                    )
+            # Record in manifest; refused edits are failures, not changes.
+            warnings = list(result.get('warnings') or [])
+            if result.get('refused_reason'):
+                warnings.append(result['refused_reason'])
+            manifest.add_change(
+                change_type='replace_text',
+                target=f"paragraph {idx}",
+                old_text=old_text,
+                new_text=new_text,
+                paragraph_index=idx,
+                method=result.get('method'),
+                success=result.get('success', False),
+                warnings=warnings,
+            )
 
-                    found = True
-                    break
+            found = True
+            break
 
         if not found:
-            results.append({
-                'success': False,
-                'warnings': [f"Text not found in scope: '{old_text[:50]}...'"],
-            })
+            results.append(
+                _failed_change(
+                    old_text, new_text,
+                    f"Text not found in scope: '{old_text[:50]}...'",
+                )
+            )
             manifest.add_change(
                 change_type='replace_text',
                 target='not found',
@@ -259,6 +541,9 @@ def writing_word_edit(file_path, replacements, scope_config=None,
                 success=False,
                 warnings=[f"Text not found in scope"],
             )
+
+    applied = sum(1 for r in results if r.get('success'))
+    failed = max(0, total_replacements - applied)
 
     # Record preserved elements
     manifest.add_preserved(f"Chapters outside scope: paragraphs 0-{scope.start_para_index-1}")
@@ -270,41 +555,172 @@ def writing_word_edit(file_path, replacements, scope_config=None,
                 f"{', '.join(p['protected_nodes'])}"
             )
 
-    # Apply the user's default academic presentation before saving.
-    # This is intentionally deterministic formatting, not content analysis.
-    default_formatting = _apply_default_academic_formatting(doc, include_unknown_tables=True)
+    # Default academic presentation is a whole-document rewrite, so it only
+    # runs in the explicit format_normalization mode. text_only/structural must
+    # leave untouched paragraphs, table styles and equation alignment alone.
+    if mode == 'format_normalization':
+        default_formatting = _apply_default_academic_formatting(
+            doc, include_unknown_tables=True
+        )
+        default_formatting['applied'] = True
+    else:
+        default_formatting = {'applied': False, 'reason': 'mode'}
 
-    # Save
-    save_path = output_path or file_path
-    doc.save(save_path)
-    manifest.finalize()
+    # Nothing was applied: never rewrite the package. Re-serialising a no-op
+    # edit still changes the ZIP layout (timestamps, part order), which would
+    # contradict the "nothing was changed" report the caller just received.
+    if mode != 'format_normalization' and applied == 0:
+        manifest.finalize()
+        return {
+            'success': False,
+            'complete': total_replacements == 0,
+            'applied': 0,
+            'failed': failed,
+            'changes': 0,
+            'total_replacements': total_replacements,
+            'output': output,
+            'saved': False,
+            'backup_path': None,
+            'restored_parts': [],
+            'error': None,
+            'scope': _scope_payload(scope),
+            'protected_elements': len(protected),
+            'default_formatting': default_formatting,
+            'package_validation': None,
+            'package_integrity': None,
+            'manifest_summary': manifest.summary(),
+        }
 
-    package_validation = validate_docx_package(save_path).to_dict()
-    # In text-only mode, only the main document XML and volatile core metadata may change.
-    allowed_parts = {'word/document.xml', 'docProps/core.xml'}
-    package_integrity = compare_package_parts(preimage_path, save_path, allowed_parts)
+    # Save to a temporary package first: the target file is only replaced after
+    # every validation passes, so a failed edit can never destroy the original.
+    preimage_fd, preimage_path = tempfile.mkstemp(
+        suffix='.docx', prefix='wg_preimage_'
+    )
+    os.close(preimage_fd)
+    shutil.copy2(file_path, preimage_path)
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix='.docx', prefix='wg_save_')
+    os.close(tmp_fd)
+
     try:
-        os.unlink(preimage_path)
-    except OSError:
-        pass
+        try:
+            doc.save(tmp_path)
+        except Exception as exc:
+            return _failed_edit_result(
+                f"保存文档失败：{exc}", output, replacements,
+                scope=scope, default_formatting=default_formatting, applied=applied,
+            )
 
-    success = package_validation['valid'] and (package_integrity['intact'] or mode != 'text_only')
-    return {
-        'success': success,
-        'output': save_path,
-        'changes': len([r for r in results if r.get('success')]),
-        'total_replacements': len(replacements),
-        'scope': {
-            'start': scope.start_para_index,
-            'end': scope.end_para_index,
-            'heading': scope.start_heading,
-        },
-        'protected_elements': len(protected),
-        'default_formatting': default_formatting,
-        'package_validation': package_validation,
-        'package_integrity': package_integrity,
-        'manifest_summary': manifest.summary(),
-    }
+        package_validation = validate_docx_package(tmp_path).to_dict()
+        # Only the main document XML and volatile core metadata may change.
+        allowed_parts = {'word/document.xml', 'docProps/core.xml'}
+        package_integrity = compare_package_parts(
+            preimage_path, tmp_path, allowed_parts
+        )
+
+        # python-docx drops unreferenced package parts (customXml, ...) on save.
+        # Copy them back from the original package before judging the result.
+        restored_parts = []
+        if package_integrity.get('removed_parts'):
+            try:
+                restored_parts = _restore_missing_parts(
+                    tmp_path, preimage_path, package_integrity['removed_parts']
+                )
+            except OSError as exc:
+                return _failed_edit_result(
+                    f"恢复缺失的包部件失败：{exc}", output, replacements,
+                    scope=scope, default_formatting=default_formatting, applied=applied,
+                )
+            if restored_parts:
+                package_validation = validate_docx_package(tmp_path).to_dict()
+                package_integrity = compare_package_parts(
+                    preimage_path, tmp_path, allowed_parts
+                )
+
+        fatal_error = None
+        if not package_validation.get('valid'):
+            fatal_error = _validation_error_message(package_validation)
+        elif not package_integrity.get('intact'):
+            fatal_error = _integrity_error_message(package_integrity)
+
+        if fatal_error:
+            result = _failed_edit_result(
+                fatal_error, output, replacements,
+                scope=scope, default_formatting=default_formatting, applied=applied,
+            )
+            result.update({
+                'package_validation': package_validation,
+                'package_integrity': package_integrity,
+                'restored_parts': list(restored_parts),
+                'protected_elements': len(protected),
+                'manifest_summary': manifest.summary(),
+            })
+            return result
+
+        # Back up the file that is about to be overwritten.
+        backup_path = None
+        if backup and os.path.exists(output):
+            backup_path = output + '.bak'
+            try:
+                shutil.copy2(output, backup_path)
+            except OSError as exc:
+                result = _failed_edit_result(
+                    f"创建备份失败：{exc}", output, replacements,
+                    scope=scope, default_formatting=default_formatting, applied=applied,
+                )
+                result.update({
+                    'package_validation': package_validation,
+                    'package_integrity': package_integrity,
+                    'restored_parts': list(restored_parts),
+                    'protected_elements': len(protected),
+                })
+                return result
+
+        # Commit the validated package.
+        try:
+            _commit_file(tmp_path, output)
+        except OSError as exc:
+            result = _failed_edit_result(
+                f"写入目标文件失败：{exc}", output, replacements,
+                scope=scope, default_formatting=default_formatting, applied=applied,
+            )
+            result.update({
+                'backup_path': backup_path,
+                'package_validation': package_validation,
+                'package_integrity': package_integrity,
+                'restored_parts': list(restored_parts),
+                'protected_elements': len(protected),
+            })
+            return result
+
+        manifest.finalize()
+        complete = applied == total_replacements
+        success = (
+            package_validation.get('valid')
+            and package_integrity.get('intact')
+            and (total_replacements == 0 or applied >= 1)
+        )
+        return {
+            'success': bool(success),
+            'complete': complete,
+            'applied': applied,
+            'failed': failed,
+            'changes': applied,
+            'total_replacements': total_replacements,
+            'output': output,
+            'saved': True,
+            'backup_path': backup_path,
+            'restored_parts': list(restored_parts),
+            'error': None,
+            'scope': _scope_payload(scope),
+            'protected_elements': len(protected),
+            'default_formatting': default_formatting,
+            'package_validation': package_validation,
+            'package_integrity': package_integrity,
+            'manifest_summary': manifest.summary(),
+        }
+    finally:
+        _safe_unlink(preimage_path)
+        _safe_unlink(tmp_path)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -453,26 +869,50 @@ def writing_word_scope_check(file_before, file_after, scope_config=None):
     if not os.path.exists(file_after):
         return {'error': f"File not found: {file_after}"}
 
+    config, config_error = _normalize_scope_config(scope_config)
+    if config_error:
+        return {
+            'error': config_error,
+            'scope_intact': False,
+            'requested_scope': str(scope_config),
+            'unchanged_regions': [],
+            'unexpected_changes': [],
+            'warnings': [],
+        }
+
     doc_before = Document(file_before)
     doc_after = Document(file_after)
 
-    if scope_config:
-        scope = resolve_scope(doc_before.paragraphs, **scope_config)
-    else:
-        scope = resolve_scope(doc_before.paragraphs)
+    scope = resolve_scope(doc_before.paragraphs, **(config or {}))
+    if getattr(scope, 'error', None):
+        # The scope itself is unresolvable: there is nothing meaningful to
+        # compare, and reporting "intact" would be a false pass.
+        return {
+            'error': scope.error,
+            'scope_intact': False,
+            'requested_scope': str(config or "full document"),
+            'unchanged_regions': [],
+            'unexpected_changes': [],
+            'warnings': list(scope.warnings),
+        }
 
     result = check_scope_integrity(
         doc_before, doc_after, scope,
-        scope_description=str(scope_config or "full document")
+        scope_description=str(config or "full document")
     )
 
-    return {
+    payload = {
         'scope_intact': result.scope_intact,
         'requested_scope': result.requested_scope,
         'unchanged_regions': result.unchanged_regions,
         'unexpected_changes': result.unexpected_changes,
         'warnings': result.warnings,
     }
+    # The upgraded integrity checker also reports structural counts.
+    counts = getattr(result, 'counts', None)
+    if counts is not None:
+        payload['counts'] = _as_jsonable(counts)
+    return payload
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -526,6 +966,7 @@ def writing_word_format_equations(file_path, output_path=None):
         'output': save_path,
         'equations_formatted_numbered': sum(1 for r in results if r.get('action') == 'formatted_numbered'),
         'equations_centered_unnumbered': sum(1 for r in results if r.get('action') == 'centered_unnumbered'),
+        'equations_skipped_inline': sum(1 for r in results if r.get('action') == 'skipped_inline'),
         'package_validation': validation,
         'details': results,
     }
@@ -632,6 +1073,24 @@ def writing_word_extract(file_path):
 # CLI Interface
 # ═══════════════════════════════════════════════════════════════════════════
 
+def _require_args(usage, minimum):
+    """缺少必需参数时向 stderr 输出用法并退出 1。"""
+    if len(sys.argv) < minimum:
+        print(f"Usage: {usage}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _emit_result(result):
+    """打印 JSON 报告；仅在命令报告致命 error 时以退出码 2 结束。
+
+    部分替换失败（success=False 但 error 为空）必须退出 0，否则宿主
+    callWordGuardAt 会抛异常，模型就看不到完整报告了。
+    """
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+    if isinstance(result, dict) and result.get('error'):
+        sys.exit(2)
+
+
 def main():
     """CLI entry point."""
     if len(sys.argv) < 2:
@@ -655,23 +1114,15 @@ def main():
     command = sys.argv[1]
 
     if command == 'scan':
-        if len(sys.argv) < 3:
-            print("Usage: scan <file.docx>")
-            sys.exit(1)
-        result = writing_word_scan(sys.argv[2])
-        print(json.dumps(result, indent=2, ensure_ascii=False))
+        _require_args('scan <file.docx>', 3)
+        _emit_result(writing_word_scan(sys.argv[2]))
 
     elif command == 'audit':
-        if len(sys.argv) < 3:
-            print("Usage: audit <file.docx>")
-            sys.exit(1)
-        result = writing_word_audit(sys.argv[2])
-        print(json.dumps(result, indent=2, ensure_ascii=False))
+        _require_args('audit <file.docx>', 3)
+        _emit_result(writing_word_audit(sys.argv[2]))
 
     elif command == 'extract':
-        if len(sys.argv) < 3:
-            print("Usage: extract <file.docx>")
-            sys.exit(1)
+        _require_args('extract <file.docx>', 3)
         # Emit UTF-8 JSON regardless of the console code page. The host reads
         # this stdout as UTF-8; without this, CJK text would be encoded with the
         # Windows locale codec (cp936/cp1252) and arrive mojibaked.
@@ -679,96 +1130,82 @@ def main():
             sys.stdout.reconfigure(encoding='utf-8')
         except Exception:
             pass
-        result = writing_word_extract(sys.argv[2])
-        print(json.dumps(result, indent=2, ensure_ascii=False))
-        if result.get('error'):
-            sys.exit(2)
+        _emit_result(writing_word_extract(sys.argv[2]))
 
     elif command == 'edit':
-        if len(sys.argv) < 4:
-            print("Usage: edit <file.docx> <replacements.json> [output.docx] [mode] [scope.json]")
-            sys.exit(1)
-        with open(sys.argv[3], 'r', encoding='utf-8') as f:
-            replacements = json.load(f)
-        output_file = sys.argv[4] if len(sys.argv) > 4 else None
+        _require_args(
+            'edit <file.docx> <replacements.json> [output.docx] [mode] [scope.json]',
+            4,
+        )
+        try:
+            with open(sys.argv[3], 'r', encoding='utf-8') as f:
+                replacements = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            _emit_result({'error': f"无法读取替换文件：{exc}"})
+        output_file = None
+        if len(sys.argv) > 4 and sys.argv[4] not in ('null', ''):
+            output_file = sys.argv[4]
         mode = sys.argv[5] if len(sys.argv) > 5 else 'text_only'
         scope_config = None
         if len(sys.argv) > 6 and sys.argv[6] not in ('null', ''):
-            raw = json.loads(sys.argv[6])
-            # TypeScript schema uses camelCase; Python scope resolver uses snake_case.
-            keymap = {
-                'startHeading': 'start_heading', 'endHeading': 'end_heading', 'heading': 'heading',
-                'startParagraph': 'start_index', 'endParagraph': 'end_index',
-            }
-            scope_config = {keymap.get(k, k): v for k, v in raw.items()}
-        result = writing_word_edit(sys.argv[2], replacements, scope_config, mode, output_file)
-        print(json.dumps(result, indent=2, ensure_ascii=False))
+            try:
+                scope_config = json.loads(sys.argv[6])
+            except json.JSONDecodeError as exc:
+                _emit_result({'error': f"范围参数不是有效 JSON：{exc}"})
+        _emit_result(writing_word_edit(
+            sys.argv[2], replacements, scope_config, mode, output_file
+        ))
 
     elif command == 'scope-check':
-        if len(sys.argv) < 4:
-            print("Usage: scope-check <before.docx> <after.docx> [scope.json]")
-            sys.exit(1)
+        _require_args('scope-check <before.docx> <after.docx> [scope.json]', 4)
         scope_config = None
         if len(sys.argv) > 4 and sys.argv[4] not in ('null', ''):
-            raw = json.loads(sys.argv[4])
-            keymap = {'startHeading':'start_heading','endHeading':'end_heading','heading':'heading',
-                      'startParagraph':'start_index','endParagraph':'end_index'}
-            scope_config = {keymap.get(k, k): v for k, v in raw.items()}
-        result = writing_word_scope_check(sys.argv[2], sys.argv[3], scope_config)
-        print(json.dumps(result, indent=2, ensure_ascii=False))
+            try:
+                scope_config = json.loads(sys.argv[4])
+            except json.JSONDecodeError as exc:
+                _emit_result({'error': f"范围参数不是有效 JSON：{exc}"})
+        _emit_result(writing_word_scope_check(sys.argv[2], sys.argv[3], scope_config))
 
     elif command == 'format-tables':
-        if len(sys.argv) < 3:
-            print("Usage: format-tables <file.docx> [output.docx] [baseline.docx]")
-            sys.exit(1)
+        _require_args('format-tables <file.docx> [output.docx] [baseline.docx]', 3)
         input_file = sys.argv[2]
         output_file = sys.argv[3] if len(sys.argv) > 3 else input_file
-        baseline_file = sys.argv[4] if len(sys.argv) > 4 and sys.argv[4] not in ('null','') else None
-        result = writing_word_format_tables(input_file, output_file, baseline_file)
-        print(json.dumps(result, indent=2, ensure_ascii=False))
+        baseline_file = sys.argv[4] if len(sys.argv) > 4 and sys.argv[4] not in ('null', '') else None
+        _emit_result(writing_word_format_tables(input_file, output_file, baseline_file))
 
     elif command == 'format-equations':
-        if len(sys.argv) < 3:
-            print("Usage: format-equations <file.docx> [output.docx]")
-            sys.exit(1)
+        _require_args('format-equations <file.docx> [output.docx]', 3)
         input_file = sys.argv[2]
         output_file = sys.argv[3] if len(sys.argv) > 3 else input_file
-        result = writing_word_format_equations(input_file, output_file)
-        print(json.dumps(result, indent=2, ensure_ascii=False))
+        _emit_result(writing_word_format_equations(input_file, output_file))
 
     elif command == 'format-paragraphs':
-        if len(sys.argv) < 3:
-            print("Usage: format-paragraphs <file.docx> [output.docx]")
-            sys.exit(1)
+        _require_args('format-paragraphs <file.docx> [output.docx]', 3)
         input_file = sys.argv[2]
         output_file = sys.argv[3] if len(sys.argv) > 3 else input_file
-        result = writing_word_format_paragraphs(input_file, output_file)
-        print(json.dumps(result, indent=2, ensure_ascii=False))
+        _emit_result(writing_word_format_paragraphs(input_file, output_file))
 
     elif command == 'format-defaults':
-        if len(sys.argv) < 3:
-            print("Usage: format-defaults <file.docx> [output.docx]")
-            sys.exit(1)
+        _require_args('format-defaults <file.docx> [output.docx]', 3)
         input_file = sys.argv[2]
         output_file = sys.argv[3] if len(sys.argv) > 3 else input_file
-        result = writing_word_format_defaults(input_file, output_file)
-        print(json.dumps(result, indent=2, ensure_ascii=False))
+        _emit_result(writing_word_format_defaults(input_file, output_file))
 
     elif command == 'package-validate':
-        result = writing_word_package_validate(sys.argv[2])
-        print(json.dumps(result, indent=2, ensure_ascii=False))
+        _require_args('package-validate <file.docx>', 3)
+        _emit_result(writing_word_package_validate(sys.argv[2]))
 
     elif command == 'fingerprint':
-        result = writing_word_fingerprint(sys.argv[2])
-        print(json.dumps(result, indent=2, ensure_ascii=False))
+        _require_args('fingerprint <file.docx>', 3)
+        _emit_result(writing_word_fingerprint(sys.argv[2]))
 
     elif command == 'equation-audit':
-        baseline_file = sys.argv[3] if len(sys.argv) > 3 else None
-        result = writing_word_equation_audit(sys.argv[2], baseline_file)
-        print(json.dumps(result, indent=2, ensure_ascii=False))
+        _require_args('equation-audit <file.docx> [baseline.docx]', 3)
+        baseline_file = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3] not in ('null', '') else None
+        _emit_result(writing_word_equation_audit(sys.argv[2], baseline_file))
 
     else:
-        print(f"Unknown command: {command}")
+        print(f"Unknown command: {command}", file=sys.stderr)
         sys.exit(1)
 
 

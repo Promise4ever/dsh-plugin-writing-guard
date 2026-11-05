@@ -52,6 +52,7 @@ class WordTableInfo:
     cols: int = 0
     style_id: Optional[str] = None
     text_preview: str = ""
+    equations: int = 0  # equation-bearing paragraphs inside table cells
 
 
 @dataclass
@@ -172,6 +173,36 @@ def _check_complex(para_element):
         'is_complex': any([has_eq, has_eq_para, has_drawing, has_field,
                           has_hyperlink, has_bookmark, has_footnote, has_comment]),
     }
+
+
+def _paragraph_has_equation(para_element) -> bool:
+    """Whether one w:p element contains OMML math (inline or block level)."""
+    return (
+        para_element.find('.//' + qn('m:oMath')) is not None
+        or para_element.find('.//' + qn('m:oMathPara')) is not None
+    )
+
+
+def _count_table_equations(table) -> int:
+    """Count equation-bearing paragraphs in a table, deduping merged cells.
+
+    python-docx repeats the same ``w:tc`` element for horizontally merged grid
+    columns, so cells are deduplicated by their underlying XML element.
+    """
+    seen_ids = set()
+    seen_refs = []  # keep proxies alive so id() cannot be recycled
+    count = 0
+    for row in table.rows:
+        for cell in row.cells:
+            tc = cell._tc
+            if id(tc) in seen_ids:
+                continue
+            seen_ids.add(id(tc))
+            seen_refs.append(tc)
+            for para in cell.paragraphs:
+                if _paragraph_has_equation(para._element):
+                    count += 1
+    return count
 
 
 # ── Document Profile Detection ────────────────────────────────────────────
@@ -328,8 +359,13 @@ def scan_docx(file_path):
             rows=rows,
             cols=cols,
             text_preview=' | '.join(cell_texts[:4]),
+            equations=(
+                _count_table_equations(doc.tables[t_idx])
+                if t_idx < len(doc.tables) else 0
+            ),
         )
         info.tables.append(t_info)
+        info.total_equations += t_info.equations
 
     # ── Section count ──
     sectPr_elements = body.findall('.//' + qn('w:sectPr'))

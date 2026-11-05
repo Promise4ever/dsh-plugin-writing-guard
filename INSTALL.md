@@ -1,4 +1,4 @@
-# Writing Guard 安装与升级（v2.3.0）
+# Writing Guard 安装与升级（v2.4.0）
 
 面向 DSH 插件 `dsh-plugin-writing-guard` 的本 fork 版本。仓库：
 [xmutfyh 上游](https://github.com/xmutfyh/dsh-plugin-writing-guard) → 本 fork
@@ -8,7 +8,7 @@
 > `dsh plugin add dsh-plugin-writing-guard` 装到的也是上游版本（不含 rc.2 适配）。
 > 要装这份适配版，只能用本仓库的 GitHub URL、git tag 或 release。
 
-**v2.3.0 的主要安装方式：在 DSH 插件扩展页填入本仓库的 GitHub URL。**
+**v2.4.0 的主要安装方式：在 DSH 插件扩展页填入本仓库的 GitHub URL。**
 该版本删掉了 `postinstall`，安装过程不再被 pnpm 的构建脚本审批拦住，
 不需要手改 `pnpm-workspace.yaml`，也不需要 `allowBuilds`。
 
@@ -65,13 +65,12 @@ dsh plugin --profile <profile> add https://github.com/Promise4ever/dsh-plugin-wr
 - skill 由插件在 `apply()` 里通过宿主的 skills 服务**运行时自注册**（正文读包内
   `skills/writing-guard/SKILL.md`），安装期不往 `DSH_HOME` 写任何文件。
 
-> URL 形态装的是仓库默认分支上的代码（v2.3.0 发布后即对应 2.3.0 的提交）。
+> URL 形态装的是仓库默认分支上的代码（v2.4.0 发布后即对应 2.4.0 的提交）。
 > 需要把版本钉死时用方式 ② 或 ③。
 
 ### 方式 ②：Release ZIP 解压到固定目录（离线）
 
-从 [Releases](https://github.com/Promise4ever/dsh-plugin-writing-guard/releases/tag/v2.3.0)
-下载 v2.3.0 的 ZIP，解压到一个**固定的**目录（例如 `D:/plugins/dsh-plugin-writing-guard`），
+下载 [v2.4.0 的 ZIP](https://github.com/Promise4ever/dsh-plugin-writing-guard/archive/refs/tags/v2.4.0.zip)，解压到一个**固定的**目录（例如 `D:/plugins/dsh-plugin-writing-guard`），
 然后按目录安装：
 
 ```sh
@@ -86,7 +85,7 @@ dsh web
 ```sh
 git clone https://github.com/Promise4ever/dsh-plugin-writing-guard.git
 cd dsh-plugin-writing-guard
-git checkout v2.3.0
+git checkout v2.4.0
 
 # 安装（Windows 路径示例）
 dsh plugin --profile <profile> add "file:D:/path/to/dsh-plugin-writing-guard"
@@ -147,6 +146,9 @@ rm -rf ~/.dsh/skills/writing-guard
 > 控制通知 `<writing_guard_control version="2.3.0">` 已送达 next-step、隔离 `DSH_HOME` 下 skill 自注册
 > 正确解析到包内 `skills/writing-guard`。
 > Desktop/GUI 里「插件扩展页 → 填 GitHub URL」这一键安装动作本身未单独记录实测结论。
+>
+> 2.4.0 没有重跑这份 headless 清单（工具注册面、skill 自注册路径、控制通知通道均未改动），
+> 它的验收依据是 493 条确定性测试（含 55 条 Python Word Guard 断言）。
 
 ---
 

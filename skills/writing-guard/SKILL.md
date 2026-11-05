@@ -238,6 +238,11 @@ Never silently alter numbers, units, statistics, citations, Figure/Table referen
 ## 注意事项
 
 - .docx 文件的自动审计已集成到插件的 `autoAuditOnWrite` 机制中
-- 编辑 Word 文档时，插件会自动创建备份（.bak 文件）
-- 复杂段落（含公式/图片/交叉引用）需要特别小心，插件会自动检测并警告
-- 建议在编辑前先调用 `writing_word_scan` 了解文档结构
+- 编辑 Word 文档时，覆盖已有文件前总会创建 `.bak` 备份（`backup_path` 指向它；输出到新文件时为 `null`）
+- 复杂段落（含公式/图片/字段/超链接）不再「只警告仍编辑」：替换跨度覆盖这些受保护节点时**直接拒绝**
+  （`refused_reason: "protected_node_in_span"`，该条计为 failed，文档零修改）；整段替换遇到同样情况返回
+  `protected_node_paragraph`
+- `text_only`（默认）只改文本，不做全篇格式化；要统一全篇学术格式必须显式传 `mode: "format_normalization"`
+- 范围边界必须成对（`startParagraph` + `endParagraph` 或 `startHeading` + `endHeading`），只给一端会报参数错误，
+  不会退化成全篇编辑
+- 建议在编辑前先调用 `writing_word_scan` 了解文档结构，编辑后用 `writing_word_scope_check` 复核范围完整性

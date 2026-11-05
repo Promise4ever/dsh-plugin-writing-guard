@@ -7,7 +7,7 @@
 > The npm package named `dsh-plugin-writing-guard` is the **upstream** build, not this adapted fork —
 > this fork publishes no npm package and has no CI of its own.
 >
-> This fork adapts upstream 2.0.2 to **DSH 0.2.1-rc.2** (version 2.3.0, tag `v2.3.0`) and has been
+> This fork adapts upstream 2.0.2 to **DSH 0.2.1-rc.2** (version 2.4.0, tag `v2.4.0`) and has been
 > **tested only on DSH 0.2.1-rc.2**; other versions are unverified. Changes vs upstream: host adaptation
 > (rc.2 peer ranges, message-source kind, tool-result protocol, Word Python paths), the regression fix for
 > control notices being silently dropped on rc.2, runtime skill self-registration (no install-time writes to
@@ -69,7 +69,7 @@ Prefer: Normalization parameters were estimated from the training data.
 ## Quick Start
 
 ```sh
-# 1) Install straight from the GitHub URL (the primary route in 2.3.0 — no build approval needed)
+# 1) Install straight from the GitHub URL (the primary route in 2.4.0 — no build approval needed)
 dsh plugin --profile <profile> add https://github.com/Promise4ever/dsh-plugin-writing-guard
 
 # 2) Restart the host so the patch layer loads
@@ -187,7 +187,7 @@ The plugin listens to `tools/post-execute`: when the agent writes/edits paper fi
 
 ## Full install
 
-**The primary route in 2.3.0 is the GitHub repository URL.** 2.3.0 removed `postinstall` and registers the
+**The primary route in 2.4.0 is the GitHub repository URL.** 2.3.0 removed `postinstall` and registers the
 skill at runtime instead, so installing writes nothing into `DSH_HOME` and needs no `pnpm-workspace.yaml`
 edit and no `allowBuilds` approval.
 
@@ -215,8 +215,7 @@ The URL tracks the repository's default branch; use a directory route when you n
 
 ### Route 2 — release ZIP unpacked to a permanent directory (offline)
 
-Download the v2.3.0 ZIP from
-[Releases](https://github.com/Promise4ever/dsh-plugin-writing-guard/releases/tag/v2.3.0), unpack it to a
+Download the [v2.4.0 ZIP](https://github.com/Promise4ever/dsh-plugin-writing-guard/archive/refs/tags/v2.4.0.zip), unpack it to a
 stable directory (e.g. `D:/plugins/dsh-plugin-writing-guard`), then install that directory:
 
 ```sh
@@ -229,7 +228,7 @@ dsh web
 ```sh
 git clone https://github.com/Promise4ever/dsh-plugin-writing-guard.git
 cd dsh-plugin-writing-guard
-git checkout v2.3.0
+git checkout v2.4.0
 
 dsh plugin --profile <profile> add "file:D:/path/to/dsh-plugin-writing-guard"
 dsh web
@@ -332,13 +331,14 @@ Repository: https://github.com/Promise4ever/dsh-plugin-writing-guard
 npm test
 ```
 
-459 deterministic TP / TN / boundary / regression tests (27 of them are the v2.3.0 skill self-registration regressions) covering:
+493 deterministic TP / TN / boundary / regression tests (27 of them are the v2.3.0 skill self-registration regressions, 34 the v2.4.0 defect regressions — 55 Python assertions are aggregated into one Node check) covering:
 
 - STYLE, Scholarship Lock, Epistemic Lock
 - Claim alignment, local citation integrity
 - Journal Profile, Journal Fit
 - Rhetorical semantics (Chinese / medoid / transition)
 - **DELIVERY (CAL detection)**: rejected alternative / process residue / baseline reality / provenance / defensive hedge / counterfactual pair / NFKC / stopwords / scientific TN / safety TN / real-migration TN
+- **v2.4.0 defect regressions**: Word Guard scope integrity, run-aware replacement, atomic save/backup, CLI exit codes, scholarship/epistemic locks, citation extraction, auto-audit notification queue
 
 This fork has **no CI configured**; the badge row above carries repo and license badges only. Run the suite locally (`pnpm install --ignore-scripts && pnpm build && pnpm test`).
 

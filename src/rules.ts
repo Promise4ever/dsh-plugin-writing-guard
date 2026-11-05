@@ -50,7 +50,7 @@ export type FindingKind = 'invariant' | 'violation' | 'candidate' | 'advisory'
 export type EditAction = 'KEEP' | 'CUT' | 'TIGHTEN' | 'REFRAME_TO_FACT' | 'RELOCATE' | 'QUERY'
 
 /** 插件版本（单点定义：state 标记、工具描述、规则速查共用，避免多处硬编码漂移） */
-export const PLUGIN_VERSION = '2.3.0'
+export const PLUGIN_VERSION = '2.4.0'
 
 export type DocumentProfile =
   | 'manuscript'    // 论文正文（含摘要/引言/方法/结果/讨论）
@@ -466,6 +466,29 @@ const JOURNAL_PASSIVE_SENTENCE_RE = /\b(?:is|are|was|were|been|being)\s+(?:\w+ed
 const JOURNAL_CITATION_RE = /\\cite(?:\[[^\]]*\])?\{[^{}]*\}|\b(?:Figure|Table|Fig\.?)\s*\d+\b|\[\d+(?:[,-]\d+)*\]|\([^)]*(?:et al\.|\d{4})[^)]*\)/gi
 const JOURNAL_BIBLIOGRAPHIC_CITATION_RE = /\\cite(?:\[[^\]]*\])?\{[^{}]*\}|\[\d+(?:[,-]\d+)*\]|\([^)]*(?:et al\.|\d{4})[^)]*\)/gi
 const JOURNAL_FIGURE_TABLE_REFERENCE_RE = /\b(?:Figure|Table|Fig\.?)\s*\d+\b/gi
+// v2.4：清洗前的文献引用计数器——cleanInline 会把 \cite{...} 整段删掉，
+// 清洗后再统计会导致 bibliographicCitationDensity 恒为 0。
+const JOURNAL_RAW_BIBLIOGRAPHIC_CITATION_RE = /\\cite[a-zA-Z]*\*?(?:\s*\[[^\]]*\]){0,2}\s*\{[^{}]*\}|\[\d+(?:[,-]\d+)*\]|\([^)]*(?:et al\.|\d{4})[^)]*\)/g
+
+// v2.4 P2-14：bibliographicDensity 必须在剥离 \cite 之前统计（一个 \cite{a,b} 计 2 条
+// 文献引用，与"引用密度"语义一致）；其余括号引用/作者-年份形态沿用正则计数。
+const JOURNAL_CITE_COMMAND_RE = /\\cite[a-zA-Z]*\*?(?:\s*\[[^\]]*\]){0,2}\s*\{([^{}]*)\}/g
+
+function countRawBibliographicCitations(raw: string): number {
+  // 与 cleanInline 的前置清理对齐：行内 code/math/链接/URL 不是引用——否则数学区间
+  // "[0,1]" 或 URL 里的数字会被误当成 [n] 文献引用。
+  let text = stripLatexComments(raw)
+    .replace(/`[^`\n]*`/g, ' ')
+    .replace(/\$[^$\n]+\$/g, ' ')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/https?:\/\/\S+/g, ' ')
+  let total = 0
+  const rest = text.replace(JOURNAL_CITE_COMMAND_RE, (_m: string, keys: string) => {
+    total += keys.split(',').map((k) => k.trim()).filter((k) => k.length > 0).length
+    return ' '
+  })
+  return total + (rest.match(JOURNAL_RAW_BIBLIOGRAPHIC_CITATION_RE) ?? []).length
+}
 
 interface JournalSectionSample {
   name: string
@@ -601,7 +624,7 @@ export function detectRhetoricalMoves(text: string, sectionName?: string): strin
   return moves
 }
 
-function computeSectionSample(text: string): JournalSectionSample {
+function computeSectionSample(text: string, rawBibCitations?: number): JournalSectionSample {
   const sentences = splitSentences(text)
   const sentenceLengths = sentences.map((s) => countWords(s))
   const paragraphs = text
@@ -631,7 +654,8 @@ function computeSectionSample(text: string): JournalSectionSample {
     firstPersonSentenceRatio: sentences.length > 0 ? round2(firstPersonSentenceCount / sentences.length) : 0,
     passiveSentenceRatio: sentences.length > 0 ? round2(passiveSentenceCount / sentences.length) : 0,
     citationDensity: perK((text.match(JOURNAL_CITATION_RE) ?? []).length),
-    bibliographicCitationDensity: perK((text.match(JOURNAL_BIBLIOGRAPHIC_CITATION_RE) ?? []).length),
+    // v2.4：优先使用清洗前统计的引用数（清洗会删掉 \cite），否则回落到文本统计
+    bibliographicCitationDensity: perK(rawBibCitations ?? (text.match(JOURNAL_BIBLIOGRAPHIC_CITATION_RE) ?? []).length),
     figureTableReferenceDensity: perK((text.match(JOURNAL_FIGURE_TABLE_REFERENCE_RE) ?? []).length),
     claimCount,
     claimDensity: perK(claimCount),
@@ -846,22 +870,24 @@ export function computeJournalProfileFromDocuments(
     try {
       const view = preprocess(doc.text)
       const sections = detectSections(view)
+      // v2.4：清洗前的文献引用总数（全 segments 汇总，供全局 sample 使用）
+      const rawBibCitations = view.segments.reduce((n, seg) => n + (seg.rawBibliographicCitations ?? 0), 0)
       if (sections.length === 0) {
-        const s = computeSectionSample(view.prose) as JournalSectionSample & { docIndex: number }
+        const s = computeSectionSample(view.prose, rawBibCitations) as JournalSectionSample & { docIndex: number }
         s.name = canonicalSectionName('unknown')
         s.docIndex = docIndex
         sectionSamples.push(s)
         rhetoricObservations.push({ section: s.name, moves: detectRhetoricalMoves(view.prose, s.name), docIndex })
       } else {
         for (const sec of sections) {
-          const s = computeSectionSample(sec.text) as JournalSectionSample & { docIndex: number }
+          const s = computeSectionSample(sec.text, sec.rawBibliographicCitations) as JournalSectionSample & { docIndex: number }
           s.name = canonicalSectionName(sec.name)
           s.docIndex = docIndex
           sectionSamples.push(s)
           rhetoricObservations.push({ section: s.name, moves: detectRhetoricalMoves(sec.text, sec.name), docIndex })
         }
       }
-      globalSamples.push(computeSectionSample(view.prose))
+      globalSamples.push(computeSectionSample(view.prose, rawBibCitations))
       parsed += 1
     } catch {
       // 单篇解析失败跳过，不影响其他论文
@@ -963,7 +989,7 @@ export function auditJournalFit(text: string, profile: JournalProfile): JournalF
 
   for (const sec of sections) {
     const name = canonicalSectionName(sec.name)
-    const cur = computeSectionSample(sec.text)
+    const cur = computeSectionSample(sec.text, sec.rawBibliographicCitations)
     cur.name = name
     const prof = profileSections.get(name)
     if (!prof) {
@@ -1110,16 +1136,19 @@ export interface ScholarshipEntity {
   value: string
 }
 
+// v2.4：数字实体保留正负号与科学计数法（-5 K / 5e-3 mg 不再退化成 5 K / 3 mg）。
+// (?<![\w.]) 保证 "5-10 mg" 里的 10 不被当成负数、小数中部不被重复匹配。
+const SCHOLARSHIP_NUM_PREFIX = '(?<![\\w.])[-−+]?\\d+(?:\\.\\d+)?(?:[eE][-−+]?\\d+)?'
 const SCHOLARSHIP_EXTRACTORS: [ScholarshipType, RegExp][] = [
   ['cite', /\\cite\*?\{[^{}]*\}/g],
   ['ref', /\\ref\*?\{[^{}]*\}/g],
   ['figure', /\bFigures?\s*\d+[a-z]?\b/gi],
   ['table', /\bTables?\s*\d+[a-z]?\b/gi],
-  ['percent', /\b\d+(?:\.\d+)?\s*%/g],
+  ['percent', new RegExp(`${SCHOLARSHIP_NUM_PREFIX}\\s*%`, 'g')],
   ['pvalue', /\bp\s*[<≤=]\s*0?\.?\d+/gi],
   ['ci', /\b\d+(?:\.\d+)?\s*[–—-]\s*\d+(?:\.\d+)?\s*(?:CI|%|m|mm|nm|mL|ml|mg|µg|kg|g|s|ms|h|d|°C|K)\b/g],
   ['doi', /\b10\.\d{4,9}\/[-._;()/:A-Z0-9]+/gi],
-  ['number', /\b\d+(?:\.\d+)?\s*(?:mm|nm|cm|km|kg|g|mg|µg|μg|mL|ml|L|s|ms|h|d|°C|K|Hz|kHz|MHz|V|W|J|mol|M)\b/g],
+  ['number', new RegExp(`${SCHOLARSHIP_NUM_PREFIX}\\s*(?:mm|nm|cm|km|kg|g|mg|µg|μg|mL|ml|L|s|ms|h|d|°C|K|Hz|kHz|MHz|V|W|J|mol|M)\\b`, 'g')],
 ]
 
 /** 提取文本中的科研实体（Scholarship Lock 的数据源） */
@@ -1146,31 +1175,53 @@ export interface ScholarshipDiff {
   added: ScholarshipEntity[]
 }
 
+/** v2.4：科研实体比较键——去掉空白（5 mg / 5mg、p < 0.05 / p<0.05 是同一实体）、
+ *  统一减号与科学计数法大小写（−5 K / 5E-3 mg）。数字与单位仍由提取正则定界，
+ *  "5 mg" 与 "50 mg" 不会因规范化被合并。 */
+function scholarshipKey(value: string, type?: ScholarshipType): string {
+  let k = value.replace(/\s+/g, '').replace(/[−–—]/g, '-')
+  // p 值大小写不改变语义（P < 0.05 = p < 0.05）；单位大小写保留（5 m ≠ 5 M）
+  if (type === 'pvalue') k = k.replace(/^P/, 'p')
+  return k.replace(/(\d)[Ee]([-+]?\d)/g, '$1e$2')
+}
+
 /**
  * 多重集差异：按出现次数而不是集合去重，避免“两个相同数值中改掉一个”
  * 被漏报（例如 before 有 5 mm、5 mm，after 有 5 mm、6 mm，应报 5 mm → 6 mm）。
  * 返回值保留原顺序，便于数值类实体按顺序配对。
  */
-function diffValueLists(beforeValues: string[], afterValues: string[]): { removed: string[]; added: string[] } {
+function diffValueLists(
+  beforeValues: string[],
+  afterValues: string[],
+  keyOf: (v: string) => string = (v) => v,
+): { removed: string[]; added: string[] } {
   const bCounts = new Map<string, number>()
   const aCounts = new Map<string, number>()
-  for (const v of beforeValues) bCounts.set(v, (bCounts.get(v) ?? 0) + 1)
-  for (const v of afterValues) aCounts.set(v, (aCounts.get(v) ?? 0) + 1)
+  for (const v of beforeValues) {
+    const k = keyOf(v)
+    bCounts.set(k, (bCounts.get(k) ?? 0) + 1)
+  }
+  for (const v of afterValues) {
+    const k = keyOf(v)
+    aCounts.set(k, (aCounts.get(k) ?? 0) + 1)
+  }
 
   const removed = beforeValues.filter((v) => {
-    const bCount = bCounts.get(v) ?? 0
-    const aCount = aCounts.get(v) ?? 0
+    const k = keyOf(v)
+    const bCount = bCounts.get(k) ?? 0
+    const aCount = aCounts.get(k) ?? 0
     if (bCount > aCount) {
-      bCounts.set(v, bCount - 1)
+      bCounts.set(k, bCount - 1)
       return true
     }
     return false
   })
   const added = afterValues.filter((v) => {
-    const aCount = aCounts.get(v) ?? 0
-    const bCount = bCounts.get(v) ?? 0
+    const k = keyOf(v)
+    const aCount = aCounts.get(k) ?? 0
+    const bCount = bCounts.get(k) ?? 0
     if (aCount > bCount) {
-      aCounts.set(v, aCount - 1)
+      aCounts.set(k, aCount - 1)
       return true
     }
     return false
@@ -1187,7 +1238,7 @@ export function diffScholarship(before: string, after: string): ScholarshipDiff 
   for (const t of types) {
     const bv = extractScholarshipEntities(before).filter((e) => e.type === t).map((e) => e.value)
     const av = extractScholarshipEntities(after).filter((e) => e.type === t).map((e) => e.value)
-    const { removed: rm, added: ad } = diffValueLists(bv, av)
+    const { removed: rm, added: ad } = diffValueLists(bv, av, (v) => scholarshipKey(v, t))
     // 数值类实体按顺序配对为 changed（如 87.3% → 89.1%）
     if (t === 'number' || t === 'percent' || t === 'pvalue' || t === 'ci') {
       const n = Math.min(rm.length, ad.length)
@@ -1212,7 +1263,7 @@ export function diffScholarshipInventory(before: string, after: string): Record<
   for (const t of types) {
     const bv = extractScholarshipEntities(before).filter((e) => e.type === t).map((e) => e.value)
     const av = extractScholarshipEntities(after).filter((e) => e.type === t).map((e) => e.value)
-    const { removed, added } = diffValueLists(bv, av)
+    const { removed, added } = diffValueLists(bv, av, (v) => scholarshipKey(v, t))
     out[t] = { removed: removed.length, added: added.length }
   }
   return out
@@ -1561,24 +1612,35 @@ export interface ClaimDrift {
   deltas?: string[]
 }
 
+/** v2.4：claim-bound marker 事件（否定/零结果/scope/证据状态共用） */
+export interface EpistemicMarkerEvent {
+  before: string
+  after: string
+  marker: string
+  sim: number
+  positionalFallback?: boolean
+  /** v2.4：该主张所在整句在修改后文本中消失（不是子句改写）——P1-7 删除检测 */
+  sentenceDeleted?: boolean
+}
+
 export interface EpistemicDrift {
   /** 主张沿因果/证据轴移动（up=变强 / down=变弱；任何方向都改变科学结论） */
   claimDrift: ClaimDrift[]
   /** 否定标记被删除（负/零结果可能被翻转）——claim-bound */
-  negationRemoved: Array<{ before: string; after: string; marker: string; sim: number; positionalFallback?: boolean }>
+  negationRemoved: EpistemicMarkerEvent[]
   /** 否定标记被引入 */
-  negationAdded: Array<{ before: string; after: string; marker: string; sim: number; positionalFallback?: boolean }>
+  negationAdded: EpistemicMarkerEvent[]
   /** 零结果表述被删除 */
-  nullResultRemoved: Array<{ before: string; after: string; marker: string; sim: number; positionalFallback?: boolean }>
+  nullResultRemoved: EpistemicMarkerEvent[]
   /** v1.2：零结果表述被引入（独立字段，不再塞 negationAdded——便于双向去重） */
-  nullResultAdded: Array<{ before: string; after: string; marker: string; sim: number; positionalFallback?: boolean }>
+  nullResultAdded: EpistemicMarkerEvent[]
   /** scope 边界消失（主张可能被泛化）——claim-bound */
-  scopeRemoved: Array<{ before: string; after: string; marker: string; sim: number; positionalFallback?: boolean }>
+  scopeRemoved: EpistemicMarkerEvent[]
   /** v1.1：scope 边界新增（主张可能被缩窄——"The treatment improves survival" → "In this cohort, …"） */
-  scopeAdded: Array<{ before: string; after: string; marker: string; sim: number; positionalFallback?: boolean }>
+  scopeAdded: EpistemicMarkerEvent[]
   /** v1.0 证据状态漂移（reported/observed/measured…消失或被替换）——claim-bound */
-  evidenceStatusRemoved: Array<{ before: string; after: string; marker: string; sim: number; positionalFallback?: boolean }>
-  evidenceStatusAdded: Array<{ before: string; after: string; marker: string; sim: number; positionalFallback?: boolean }>
+  evidenceStatusRemoved: EpistemicMarkerEvent[]
+  evidenceStatusAdded: EpistemicMarkerEvent[]
   /** v1.2：含受保护 markers 的未配对主张（不要假定这些 commitments 被保留） */
   alignmentUncertain: Array<{ before: string; markers: string[]; sim: number }>
 }
@@ -1803,12 +1865,46 @@ export function diffEpistemic(before: string, after: string): EpistemicDrift {
     }
   }
 
+  // v2.4 P1-7：整句未对齐（原文有、修改后没有对应句）——旧实现只处理能对齐到修改后
+  // 文本的句子，"整句被删掉"的零结果/否定/scope 主张被完全忽略。这里只对含受保护
+  // markers 的未对齐整句报告删除事件；若修改后仍有相似句（≥0.3）则视为改写/重排，
+  // 不报删除（避免整段重写产生海量误报），维持原有 alignment-uncertain 语义。
+  const matchedBefore = new Set(pairs.map((p) => p.beforeIdx))
+  const positionalFallbackApplies = pairs.length === 0 && bs.length === as.length && bs.length <= 3
+  const deletedAfterLabel = '（该句在修改后文本中消失）'
+  if (!positionalFallbackApplies) {
+    const aTokens = as.map((a) => tokenizeRaw(a))
+    for (let i = 0; i < bs.length; i++) {
+      if (matchedBefore.has(i)) continue
+      // "删除"而非"改写"：修改后没有任何句子与该句达到改写级相似度
+      const bTok = tokenizeRaw(bs[i])
+      let bestSim = 0
+      for (const aTok of aTokens) {
+        const sim = cosineSimilarity(bTok, aTok)
+        if (sim > bestSim) bestSim = sim
+      }
+      if (bestSim >= 0.3) continue
+      // 受保护集合与 alignmentUncertain 对齐：零结果 / 否定 / scope 边界。
+      // 证据状态（reported/measured…）不在此列——方法句被整句删掉属常规改写，纳入会产生大量误报。
+      const reportDeleted = (bSpan: ClaimSpan, markers: string[], push: (e: EpistemicMarkerEvent) => void): void => {
+        for (const m of markers) {
+          push({ before: bSpan.clause.slice(0, 120), after: deletedAfterLabel, marker: canonicalMarker(m), sim: bestSim, sentenceDeleted: true })
+        }
+      }
+      for (const bSpan of extractClaimSpans(bs[i])) {
+        reportDeleted(bSpan, bSpan.negationMarkers, (e) => out.negationRemoved.push(e))
+        reportDeleted(bSpan, bSpan.nullMarkers, (e) => out.nullResultRemoved.push(e))
+        reportDeleted(bSpan, bSpan.scopeMarkers, (e) => out.scopeRemoved.push(e))
+      }
+    }
+  }
+
   // v1.2：短文档位置配对兜底——句子级对齐失败（minSim 0.45）但双方句数相同且 ≤3 时，
   // 位置即身份（没有错配余地）：按位置配对跑 marker 守恒（claim-drift 仍要求词面相似，
   // 不在此兜底）——"Z improved" → "Z did not improve"（sim≈0.35）不再是漏报。
   // v1.2.1：事件携带真实相似度（不再硬编码 0.5）+ positionalFallback 标记（报告明示
   // "这是位置兜底，不是高可信词面对齐"）。
-  if (pairs.length === 0 && bs.length === as.length && bs.length <= 3) {
+  if (positionalFallbackApplies) {
     for (let i = 0; i < bs.length; i++) {
       const realSim = cosineSimilarity(tokenizeRaw(bs[i]), tokenizeRaw(as[i]))
       const bSpans = extractClaimSpans(bs[i])
@@ -1831,24 +1927,30 @@ export function diffEpistemic(before: string, after: string): EpistemicDrift {
     }
   }
 
-  // v1.2：null/negation 双向去重（removed 与 added 各自对称）——"did not improve" 同时命中
-  // 否定与零结果正则时只保留更具体的零结果事件
-  const nullRemovedSet = new Set(out.nullResultRemoved.map((d) => canonicalMarker(d.marker)))
-  out.negationRemoved = out.negationRemoved.filter((d) => {
-    const k = canonicalMarker(d.marker)
-    for (const nk of nullRemovedSet) {
-      if (nk !== k && (nk.includes(k) || k.includes(nk))) return false
+  // v2.4 P2-13：null/negation 双向去重必须绑定到同一 claim（同一组 before/after 标签），
+  // 不能用跨句全局 set——否则第二句的否定事件会被第一句的零结果事件吞掉。
+  // "did not improve" 同时命中否定与零结果正则时只保留更具体的零结果事件（同一 claim 内）。
+  const dropShadowedNegations = (
+    negEvents: EpistemicMarkerEvent[],
+    nullEvents: EpistemicMarkerEvent[],
+  ): EpistemicMarkerEvent[] => {
+    const nullByClaim = new Map<string, string[]>()
+    for (const d of nullEvents) {
+      const g = `${d.before}\u0000${d.after}`
+      const arr = nullByClaim.get(g) ?? []
+      arr.push(canonicalMarker(d.marker))
+      nullByClaim.set(g, arr)
     }
-    return true
-  })
-  const nullAddedSet = new Set(out.nullResultAdded.map((d) => canonicalMarker(d.marker)))
-  out.negationAdded = out.negationAdded.filter((d) => {
-    const k = canonicalMarker(d.marker)
-    for (const nk of nullAddedSet) {
-      if (nk !== k && (nk.includes(k) || k.includes(nk))) return false
-    }
-    return true
-  })
+    return negEvents.filter((d) => {
+      const k = canonicalMarker(d.marker)
+      for (const nk of nullByClaim.get(`${d.before}\u0000${d.after}`) ?? []) {
+        if (nk !== k && (nk.includes(k) || k.includes(nk))) return false
+      }
+      return true
+    })
+  }
+  out.negationRemoved = dropShadowedNegations(out.negationRemoved, out.nullResultRemoved)
+  out.negationAdded = dropShadowedNegations(out.negationAdded, out.nullResultAdded)
   return out
 }
 
@@ -1866,7 +1968,9 @@ export function simTier(sim: number): { confidence: Confidence; severity: Severi
  *  - 正常对齐 <0.55 → candidate
  *  - 位置兜底 + sim ≥0.55 → invariant
  *  - 位置兜底 + sim <0.55 → candidate（低可信，明示"短文本位置兜底"） */
-function markerEventTier(sim: number, positionalFallback?: boolean): { confidence: Confidence; kind: FindingKind } {
+function markerEventTier(sim: number, positionalFallback?: boolean, sentenceDeleted?: boolean): { confidence: Confidence; kind: FindingKind } {
+  // v2.4：整句在修改后消失是确定性事件（不存在对应句），不受相似度分档限制
+  if (sentenceDeleted) return { confidence: 'high', kind: 'invariant' }
   if (positionalFallback && sim < 0.55) return { confidence: 'low', kind: 'candidate' }
   const t = simTier(sim)
   return { confidence: t.confidence, kind: t.kind }
@@ -3124,6 +3228,8 @@ export interface Segment {
   text: string
   /** v0.5.1：标题级别（Markdown # 数量 / LaTeX section=1 subsection=2...），非 heading 段无此字段 */
   headingLevel?: number
+  /** v2.4：该段清洗前的文献引用数（journal 引用密度用——cite 命令在 cleanInline 中被删除） */
+  rawBibliographicCitations?: number
 }
 
 export interface DocumentView {
@@ -3169,12 +3275,21 @@ export function preprocess(text: string): DocumentView {
   const flushProse = (buf: string[]): void => {
     if (buf.length === 0) return
     const raw = buf.join('\n')
+    // v2.4：清洗前统计文献引用（\cite 系列会被 cleanInline 整段删除）
+    const rawBibCitations = countRawBibliographicCitations(raw)
     const cleaned = cleanInline(raw)
     // prose 段按空行再拆（保持段落粒度）
+    const paras: string[] = []
     for (const para of cleaned.split(/\n{2,}/)) {
       const p = para.trim()
-      if (p.length > 0) segments.push({ kind: 'prose', text: p })
+      if (p.length > 0) paras.push(p)
     }
+    // 同一 buffer 的段落同属一个 section：引用数挂在最后一段，detectSections 按段累加
+    paras.forEach((p, idx) => {
+      const seg: Segment = { kind: 'prose', text: p }
+      if (idx === paras.length - 1 && rawBibCitations > 0) seg.rawBibliographicCitations = rawBibCitations
+      segments.push(seg)
+    })
   }
 
   let buf: string[] = []
@@ -3292,6 +3407,8 @@ const SECTION_NAMES = [
 export interface Section {
   name: string
   text: string
+  /** v2.4：本 section 清洗前的文献引用数（bibliographicCitationDensity 的数据源） */
+  rawBibliographicCitations?: number
 }
 
 /**
@@ -3317,11 +3434,13 @@ export function detectSections(view: DocumentView): Section[] {
   const sections: Section[] = []
   let current = 'unknown'
   let buf: string[] = []
+  let bufRawBibCitations = 0
 
   const flush = () => {
     if (buf.length > 0) {
-      sections.push({ name: current, text: buf.join('\n') })
+      sections.push({ name: current, text: buf.join('\n'), rawBibliographicCitations: bufRawBibCitations })
       buf = []
+      bufRawBibCitations = 0
     }
   }
 
@@ -3337,6 +3456,7 @@ export function detectSections(view: DocumentView): Section[] {
       // 子标题（level ≠ 基准）：不新开 section，正文继续归当前顶层章节
     } else if (seg.kind === 'prose') {
       buf.push(seg.text)
+      bufRawBibCitations += seg.rawBibliographicCitations ?? 0
     }
   }
   flush()
@@ -3784,9 +3904,27 @@ export interface CitationIntegrityHit {
   detail: string
 }
 
-/** 正文 \cite key 提取（含多 key：\cite{a,b}） */
+/** v2.4：剥离 LaTeX 注释（未转义的 % 到行尾）——`\%` 是字面百分号，不剥。
+ *  注释里的 \cite/\ref 不是真实引用：citation integrity 与引用密度统计都必须先剥注释。 */
+function stripLatexComments(text: string): string {
+  return text
+    .split('\n')
+    .map((line) => {
+      for (let i = 0; i < line.length; i++) {
+        if (line[i] !== '%') continue
+        let slashes = 0
+        for (let j = i - 1; j >= 0 && line[j] === '\\'; j--) slashes += 1
+        if (slashes % 2 === 0) return line.slice(0, i)
+      }
+      return line
+    })
+    .join('\n')
+}
+
+/** v2.4：\cite 家族 key 提取——支持 \citep/\citet/\citealp/\citeauthor/\citeyear/\cite*，
+ *  以及最多两个可选参数（\citep[see][p.~3]{a,b}）。 */
 function extractCiteKeys(text: string): string[] {
-  const re = /\\cite(?:\[[^\]]*\])?\{([^{}]*)\}/g
+  const re = /\\cite[a-zA-Z]*\*?(?:\s*\[[^\]]*\]){0,2}\s*\{([^{}]*)\}/g
   const keys: string[] = []
   let m: RegExpExecArray | null
   while ((m = re.exec(text)) !== null) {
@@ -3798,28 +3936,37 @@ function extractCiteKeys(text: string): string[] {
   return keys
 }
 
-/** \label 与 \ref 提取 */
+/** v2.4：\label 与交叉引用提取——\ref/\eqref/\autoref/\pageref/\cref 引用的是 label
+ *  （公式/图表/章节），不是文献 key；只查 label 一致性，不查 .bib。 */
 function extractLabelsRefs(text: string): { labels: Set<string>; refs: string[] } {
   const labels = new Set<string>()
   const refs: string[] = []
   let m: RegExpExecArray | null
   const lRe = /\\label\{([^{}]*)\}/g
   while ((m = lRe.exec(text)) !== null) labels.add(m[1].trim())
-  const rRe = /\\ref\{([^{}]*)\}/g
-  while ((m = rRe.exec(text)) !== null) refs.push(m[1].trim())
+  const rRe = /\\(?:eqref|autoref|pageref|cref|Cref|ref)\*?\{([^{}]*)\}/g
+  while ((m = rRe.exec(text)) !== null) {
+    for (const r of m[1].split(',')) {
+      const t = r.trim()
+      if (t) refs.push(t)
+    }
+  }
   return { labels, refs }
 }
 
 export function checkCitationIntegrity(text: string, bibText: string): CitationIntegrityHit[] {
   const hits: CitationIntegrityHit[] = []
-  const entries = parseBibText(bibText)
+  // v2.4：先剥掉 LaTeX 注释（% \cite{ghost} 是被注释掉的引用，不应报缺失），
+  // 再按 \cite 家族 / 交叉引用命令扫描。
+  const body = stripLatexComments(text)
+  const entries = parseBibText(stripLatexComments(bibText))
   const keys = new Set(entries.map((e) => e.key))
   // 1. unresolved \cite key
-  for (const k of extractCiteKeys(text)) {
+  for (const k of extractCiteKeys(body)) {
     if (!keys.has(k)) hits.push({ kind: 'unresolved-cite', detail: `\\cite{${k}} 在 .bib 中不存在` })
   }
   // 2. \ref ↔ \label
-  const { labels, refs } = extractLabelsRefs(text)
+  const { labels, refs } = extractLabelsRefs(body)
   for (const r of refs) {
     if (!labels.has(r)) hits.push({ kind: 'missing-label', detail: `\\ref{${r}} 无对应 \\label{${r}}` })
   }
@@ -4511,7 +4658,7 @@ export function auditText(text: string, opts?: AuditOptions): AuditReport {
       })
     }
     for (const d of ed.negationRemoved) {
-      const tier = markerEventTier(d.sim, d.positionalFallback)
+      const tier = markerEventTier(d.sim, d.positionalFallback, d.sentenceDeleted)
       hits.push({
         ruleId: 'negation-drift',
         category: 'claim_calibration',
@@ -4529,7 +4676,7 @@ export function auditText(text: string, opts?: AuditOptions): AuditReport {
       })
     }
     for (const d of ed.negationAdded) {
-      const tier = markerEventTier(d.sim, d.positionalFallback)
+      const tier = markerEventTier(d.sim, d.positionalFallback, d.sentenceDeleted)
       hits.push({
         ruleId: 'negation-drift',
         category: 'claim_calibration',
@@ -4548,7 +4695,7 @@ export function auditText(text: string, opts?: AuditOptions): AuditReport {
     }
     // v1.2：零结果表述被引入（独立事件）
     for (const d of ed.nullResultAdded) {
-      const tier = markerEventTier(d.sim, d.positionalFallback)
+      const tier = markerEventTier(d.sim, d.positionalFallback, d.sentenceDeleted)
       hits.push({
         ruleId: 'negation-drift',
         category: 'claim_calibration',
@@ -4584,7 +4731,7 @@ export function auditText(text: string, opts?: AuditOptions): AuditReport {
       })
     }
     for (const d of ed.nullResultRemoved) {
-      const tier = markerEventTier(d.sim, d.positionalFallback)
+      const tier = markerEventTier(d.sim, d.positionalFallback, d.sentenceDeleted)
       hits.push({
         ruleId: 'negation-drift',
         category: 'claim_calibration',
@@ -4602,7 +4749,7 @@ export function auditText(text: string, opts?: AuditOptions): AuditReport {
       })
     }
     for (const d of ed.scopeRemoved) {
-      const tier = markerEventTier(d.sim, d.positionalFallback)
+      const tier = markerEventTier(d.sim, d.positionalFallback, d.sentenceDeleted)
       hits.push({
         ruleId: 'scope-drift',
         category: 'claim_calibration',
@@ -4621,7 +4768,7 @@ export function auditText(text: string, opts?: AuditOptions): AuditReport {
     }
     // v1.1：scope 新增（主张可能被缩窄——外部有效性悄悄收窄同样是科学变化）
     for (const d of ed.scopeAdded) {
-      const tier = markerEventTier(d.sim, d.positionalFallback)
+      const tier = markerEventTier(d.sim, d.positionalFallback, d.sentenceDeleted)
       hits.push({
         ruleId: 'scope-drift',
         category: 'claim_calibration',
@@ -4643,7 +4790,7 @@ export function auditText(text: string, opts?: AuditOptions): AuditReport {
     // "participants reported improvement" ≠ "participants improved"——报告≠事实；
     // observed → estimated 是状态替换，同样改变读者对证据来源的理解。
     for (const d of ed.evidenceStatusRemoved) {
-      const tier = markerEventTier(d.sim, d.positionalFallback)
+      const tier = markerEventTier(d.sim, d.positionalFallback, d.sentenceDeleted)
       hits.push({
         ruleId: 'evidence-status-drift',
         category: 'claim_calibration',
@@ -4661,7 +4808,7 @@ export function auditText(text: string, opts?: AuditOptions): AuditReport {
       })
     }
     for (const d of ed.evidenceStatusAdded) {
-      const tier = markerEventTier(d.sim, d.positionalFallback)
+      const tier = markerEventTier(d.sim, d.positionalFallback, d.sentenceDeleted)
       hits.push({
         ruleId: 'evidence-status-drift',
         category: 'claim_calibration',

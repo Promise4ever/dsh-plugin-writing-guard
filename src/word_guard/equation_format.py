@@ -132,10 +132,37 @@ def _find_number_child_index(paragraph, after_index: int):
     return None, match.group(0).strip()
 
 
+def _is_standalone_equation(paragraph) -> bool:
+    """Whether the paragraph is a display equation rather than inline math.
+
+    A paragraph qualifies when it contains a block-level ``m:oMathPara`` or when
+    all visible text outside the math is whitespace or a trailing equation
+    number (for example ``(7)``).  Inline math inside running text must never
+    change the paragraph alignment.
+    """
+    children = list(paragraph._p)
+    if any(child.tag == qn('m:oMathPara') for child in children):
+        return True
+
+    residual = []
+    for child in children:
+        if _contains_math(child):
+            continue
+        residual.append(_child_visible_text(child))
+    text = _NUM_RE.sub('', ''.join(residual))
+    return not text.strip()
+
+
 def format_equation_paragraph(paragraph, section) -> dict:
     """Apply the default layout to one paragraph containing an OMML equation."""
     if not _contains_math(paragraph._p):
         return {'action': 'skipped', 'reason': 'no_omml'}
+
+    # Inline equations (``正文 $x$ 正文``) share their paragraph with running
+    # text; centering or adding tabs would reflow the whole paragraph, so leave
+    # the layout untouched.
+    if not _is_standalone_equation(paragraph):
+        return {'action': 'skipped_inline', 'reason': 'inline_equation'}
 
     # Rebuild only the paragraph's alignment tabs, never the OMML equation.
     _remove_direct_tab_runs(paragraph)

@@ -66,6 +66,71 @@ PROTECTED_TAGS = {
     'ftr': qn('w:ftr'),
 }
 
+# 反向映射：XML 标签 → 受保护节点名（按文档顺序遍历整棵子树时使用）
+_TAG_TO_PROTECTED_NAME = {tag: name for name, tag in PROTECTED_TAGS.items()}
+
+
+def _as_element(node):
+    """兼容 python-docx 包装对象（如 Paragraph）与裸 lxml 元素。"""
+    return node._element if hasattr(node, '_element') else node
+
+
+def protected_nodes_in_element(element):
+    """
+    返回 element 子树里出现的受保护节点标签名。
+
+    按 PROTECTED_TAGS 的键名返回，文档顺序、去重；element 自身也参与判断。
+
+    Args:
+        element: lxml 元素或 python-docx 包装对象（如 Paragraph）
+
+    Returns:
+        list[str]
+    """
+    element = _as_element(element)
+    if element is None:
+        return []
+    names = []
+    for node in element.iter():
+        name = _TAG_TO_PROTECTED_NAME.get(node.tag)
+        if name is not None and name not in names:
+            names.append(name)
+    return names
+
+
+def protected_nodes_between(paragraph, first_run_index, last_run_index):
+    """
+    返回 paragraph 直接 run 列表里 [first, last] 区间内各 run 含的受保护节点标签名。
+
+    只统计 w:p 的直接 w:r 子节点（与 Paragraph.runs 一致）；索引会自动收敛到
+    合法范围，避免越界。
+
+    Args:
+        paragraph: python-docx Paragraph 对象或 w:p 元素
+        first_run_index: 起始 run 索引（含）
+        last_run_index: 结束 run 索引（含）
+
+    Returns:
+        list[str]：文档顺序、去重
+    """
+    element = _as_element(paragraph)
+    if element is None:
+        return []
+    runs = [child for child in element if child.tag == qn('w:r')]
+    if not runs:
+        return []
+
+    last_index = len(runs) - 1
+    start = max(0, min(first_run_index, last_run_index, last_index))
+    end = max(0, min(max(first_run_index, last_run_index), last_index))
+
+    names = []
+    for run_elem in runs[start:end + 1]:
+        for name in protected_nodes_in_element(run_elem):
+            if name not in names:
+                names.append(name)
+    return names
+
 
 def is_protected_node(element):
     """

@@ -10,6 +10,74 @@ aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > [xmutfyh/dsh-plugin-writing-guard](https://github.com/xmutfyh/dsh-plugin-writing-guard)，
 > 由本 fork 原样继承；本 fork 新增的条目会在标题里标注「fork」。
 
+## [2.4.0] - 2026-11-05
+
+> 2.4.0 是**缺陷修复版本**：修掉 2.3.0 全量代码审查中复现的 20 个问题（8 个 P1、12 个 P2），没有新增功能。
+> 变化集中在三处：**Word 编辑不再可能静默损坏文档**、**范围与结果字段语义变严格**、**规则层不再漏报或误报**。
+
+### Fixed — P1：Word 编辑会静默损坏文档（fork）
+
+1. **跨 run 替换会连图片、域、公式一起删掉。** 旧实现按 `run.text` 定位后直接 `remove()` 掉中间 run 与末 run（2.3.0 的 `editor.py:247-248`、`:256`），跨度里只要有 `w:drawing`、`w:fldChar`、`m:oMath`，替换成功的同时这些东西就消失了，而 `manifest` 还写着 preserved、`package_guard` 也报 `valid`。
+   现在替换走**文本段（segment）模型**：`_segment_text`（`src/word_guard/editor.py:253`）把每个 run 拆成 `w:t` / `w:tab` / `w:br` / `w:cr` / `w:ptab` / `noBreakHyphen` / `softHyphen` 段，按字符偏移定位，**永不删除 `w:r`**，替换文本写进新建的 run（`_new_text_run`，`:205`，`addnext` 到首个被覆盖 run 之后，继承原 `w:rPr`）。
+   跨度一旦覆盖原子文本节点（`w:tab`/`w:br`/`w:ptab`/`noBreakHyphen`/`softHyphen`）、或覆盖 run 内的受保护节点（drawing/field/OMML/脚注/批注/超链接等，判定见 `protected_nodes_between`）、或横跨文本容器，就**整条拒绝**：`success=false`、`refused_reason="protected_node_in_span"`、`preserved_nodes` 列出被保护的节点、文档零修改（`replace_text_in_paragraph`，`:462`）。异常路径用深拷贝回滚。
+   `replace_entire_paragraph`（`:562`）同规则：遇受保护节点返回 `refused_reason="protected_node_paragraph"`，不再删 `runs[1:]`。
+2. **`text_only` 局部编辑会顺手格式化全篇。** 旧实现在每次编辑末尾无条件调用 `_apply_default_academic_formatting`（2.3.0 的 `cli.py:273-275`），于是替换一个词也会把表格改成三线表、正文改 JUSTIFY、公式居中，且 `scope_check` 报 intact。
+   现在全篇格式化**只在 `mode: "format_normalization"` 执行**，其它模式返回 `default_formatting: {"applied": false, "reason": "mode"}`（`writing_word_edit`，`src/word_guard/cli.py:399`）。
+3. **覆盖原文件时没有备份，而且是先保存后校验。** 旧实现只在 `output_path is None` 时建 `.bak`（2.3.0 的 `cli.py:170-172`），工具侧又总是显式传 output，所以覆盖自身永远没有备份；并且先 `doc.save()` 再校验，校验失败时原稿已经被覆盖。
+   现在落盘流程是：**预镜像 → 存临时文件 → 校验包 → 与预镜像比对部件 → 修补 python-docx 丢弃的部件 → 重新校验 → 备份 → 原子替换**（`_restore_missing_parts` `:287`、`_commit_file` `:317`，`os.replace` 最多重试 5 次）。覆盖已有文件**总是**生成 `.bak`（`backup_path` 指向它），输出到新文件时 `backup_path` 为 `null`。校验失败：目标文件逐字节不变、不留 `.bak`、`saved=false`。
+4. **范围只给一端会静默退化成全篇。** 旧实现要求 `start_index` 与 `end_index` 同时非空，否则直接落到「默认全篇」（2.3.0 的 `scope.py:153`、`:234-236`），`{"startParagraph": 1}` 等于「编辑整篇」。
+   现在 `EditScope` 增加 `error`（`src/word_guard/scope.py:145`）：起止索引不成对、起止标题不成对、`heading` 与起止标题冲突、索引越界或负数、`start > end`、标题找不到，一律给出中文错误、`included_paragraphs=[]`、`ambiguous=true`，编辑被拒绝。**只有完全不传范围参数才是全篇。**
+5. **单个 run 里有多个 `w:t`、或夹着 `w:tab` 时替换会写坏正文。** 旧 `_split_single_run` 只改第一个 `w:t` 就 `break`，`abcDEF` 替换 `bcD→X` 得到 `aDEFXEF`，`ab\tcd` 替换 `cd→X` 得到 `ab\t\tcdX`。由 P1-1 的 segment 模型一并修掉（`w:t` 之外的节点按原子段处理）。
+6. **完整性检查在段落数变化时只 warning，比较还取 `min` 长度。** 旧实现（2.3.0 的 `integrity.py:51-55`、`:58`）导致删掉尾段也报 `scope_intact=true`、`unexpected_changes=[]`，还写「All out-of-scope content is unchanged」；表格与页眉页脚根本不比较。
+   现在 `check_scope_integrity`（`src/word_guard/integrity.py:148`）返回 `counts`（六项计数），段落数变化、尾部段落消失、表格增删或单元格文本变化、页眉页脚文本变化、范围外段落的文本/对齐/样式变化都会让 `scope_intact=false`，并按 `kind`（`paragraph_count` / `paragraph` / `paragraph_format` / `table` / `header_footer`）写进 `unexpected_changes`。页眉页脚快照先判 `is_linked_to_previous` 再读段落，不会凭空创建 header part（`_header_footer_snapshot`，`:98`）。只有真的没有异常时才写「All out-of-scope content is unchanged」。
+
+### Fixed — P1：规则层漏报（fork）
+
+7. **整句被删掉的受保护主张不报。** 旧对齐逻辑只处理能配上对的句子（2.3.0 的 `rules.ts:1661-1690`、`:1806-1811`），`"The treatment did not improve survival. The samples were stored safely."` → `"The samples were stored safely."` 得到全空结果，`auditText` 的 integrity 六项全 0。
+   现在 `diffEpistemic` 增加了**整句删除检测**（`src/rules.ts:1881-1901`）：未对齐的 before 句若与任何 after 句相似度 `< 0.3`，就按句中标记产出 `sentenceDeleted: true` 的 null-result / negation / scope 事件；`markerEventTier`（`:1971`）把 `sentenceDeleted` 定为 `high` + `invariant`。实测同一例给出 `nullResultRemoved[{sentenceDeleted: true, marker: "did not improve"}]` 与 `integrity.negationDrift: 1`。
+8. **数字实体正则丢符号与科学计数法前缀。** 旧正则（2.3.0 的 `rules.ts:1118-1122`）让 `-5 K → 5 K`、`5e-3 mg → 8e-3 mg` 都判成「没变」。现在统一前缀 `SCHOLARSHIP_NUM_PREFIX`（`src/rules.ts:1141`）：`(?<![\w.])[-−+]?\d+(?:\.\d+)?(?:[eE][-−+]?\d+)?`，负号与指数都在匹配内。
+
+### Fixed — P2：误报、漏报与契约不一致（fork）
+
+9. **包校验不检查正文里的 `r:id` 是否存在。** 插入 `w:hyperlink r:id="rIdMISSING"` 仍 `valid=true`。现在 `_collect_relationship_refs`（`src/word_guard/package_guard.py:74`）收集正文各部件的关系引用，逐个对照 `.rels`，缺失即 `errors`：`Dangling relationship reference in {part}: r:{local}='{id}' is not defined in {rels}`；`[Content_Types].xml` 与 `*.rels` 自身跳过。
+10. **行内公式会把整段居中。** 旧实现只要段落含数学就把 `alignment` 设成 CENTER（2.3.0 的 `equation_format.py:135-149`、`:195-204`）。现在 `_is_standalone_equation`（`src/word_guard/equation_format.py:135`）先判定「块级 `m:oMathPara`」或「整段只有公式 + 编号」，行内公式返回 `{"action": "skipped_inline", "reason": "inline_equation"}`，段落对齐不动；`writing_word_format_equations` 增加 `equations_skipped_inline` 计数。
+11. **表格里的公式不计入 `objects.equations`。** `scanner.scan_docx` 只扫顶层段落（2.3.0 的 `scanner.py:226-332`），表格内 OMML 恒为 0。现在 `_count_table_equations`（`src/word_guard/scanner.py:186`）按 `cell._tc` 元素身份去重（合并单元格只算一次）并累加进 `total_equations`，`WordTableInfo` 增加 `equations` 字段。
+12. **全部替换失败仍报 `success=true`；`scan` 文件不存在退出码 0；缺参数直接 IndexError。** 现在零应用时走短路分支：不重写 docx（避免无谓改动 ZIP 布局与时间戳），返回 `success=false`、`complete=false`、`applied=0`、`failed=N`、`changes=0`、`saved=false`。CLI 增加 `_require_args`（`src/word_guard/cli.py:1076`，缺参数 → Usage + exit 1）与 `_emit_result`（`:1083`，结果含 `error` → JSON + exit 2）；`scan`/`audit`/`package-validate`/`fingerprint`/`equation-audit` 全部补齐参数检查，文件不存在 → exit 2。
+13. **null/negation 事件去重不绑定主张。** 旧实现全局比对文本（2.3.0 的 `rules.ts:1836-1849`），`did not improve` + `not reversible` → `improved` + `reversible` 时 `negationRemoved` 被跨主张吞掉。现在 `dropShadowedNegations`（`src/rules.ts:1933`）按 `${before}\u0000${after}` 分组，只删除同一主张内被 null-result 事件覆盖的 negation。
+14. **Journal 统计前把 LaTeX 引用删光了。** 旧实现先剥离 `\cite{...}` 再统计（2.3.0 的 `rules.ts:633-635`、`:847-864`、`:3140-3153`），`bibliographicDensity` 恒为 0。现在引用先计数再剥离；实测 0/1/2/4/8 条 `\cite` 对应 `bibliographicDensity.median` = 0 / 21.74 / 43.48 / 86.96 / 173.91，严格单调。
+15. **引用完整性只认 `\cite`，还会把 `%` 注释里的引用当真。** 现在 `stripLatexComments`（`src/rules.ts:3909`）先去掉 LaTeX 注释，`extractCiteKeys`（`:3926`）识别 `\cite` / `\citep` / `\citet` / `\cite*` 等变体（最多两个可选参数、逗号分隔多 key），`extractLabelsRefs`（`:3941`）识别 `\eqref` / `\autoref` / `\pageref` / `\cref` / `\Cref` / `\ref`。`\eqref` 指向不存在的 label 现在报 missing-label，`% \cite{ghost}` 不报。
+16. **实体比较不规范化空白，纯排版改动被当成改数据。** `p < 0.05 → p<0.05`、`5 mg → 5mg` 曾报 `high` + `invariant` 的 scholarship-lock。现在 `scholarshipKey`（`src/rules.ts:1181`）做比较键：去掉全部空白、统一减号字形、科学计数法小写、`P`/`p` 归一。注意这会改变事件指纹，见下面的 `FINGERPRINT_VERSION`。
+17. **DELIVERY 的 baseline 分支不认受保护否定语境。** `"works without causing harm."` 配 baseline `"The treatment was evaluated."` 曾误报 `UNJUSTIFIED_NEGATIVE_REFERENCE`（`matchedTerm: "causing harm"`）。现在 baseline 分支也调用 `isProtectedActionContext`（`src/delivery.ts:555`）：以命中点为中心 ±40 字符、按句末标点截断，落在 `without` / `avoid` 等受保护语境里就不报。
+18. **每条动作正则只取第一个命中，且不认祈使原形。** `"Remove Cache. Remove Ghost."`（baseline 只有 Cache）曾漏掉 Ghost；`"Replace Redux with signals."` 因为正则只有 `replace[sd]?` / `replacing` 而不匹配。现在 `globalCopy`（`src/delivery.ts:545`）补 `g` 标志并用 `matchAll` 遍历全部命中、按 `${m.index}:${subject}` 去重，替换类正则改为 `/\b(?:replace[sd]?|replacing)\s+(.{3,60}?)\s+with\b/i`（`replac(?:ed|ing)` 不再漏祈使原形）。
+19. **baseline 用任意子串判存在。** `"Remove toast."` 配 baseline `"We toasted bread."` 曾判成「baseline 里有 toast」而不报。现在 `wordFormPresent`（`src/delivery.ts:489`）做整词匹配（接受 `toast`/`toasts`，拒绝 `toasted`），`existsInBaseline`（`:516`）的整句、核心对象、token 三层全部走整词匹配。
+20. **自动审计的注入上限在检查前就推进了状态。** 旧实现在 `maxAutoInjectPerTurn` 判断**之前**就把当前指纹集合写进 `auditState`（2.3.0 的 `index.ts:1183-1216`），超出上限、没送达的通知下一轮不再算 `added`，等于永久丢失。现在拆出纯函数 `planAutoAuditDelivery`（`src/index.ts:228`）返回 `inject` / `enqueue` / `silent` / `skip` 与是否记录状态；超出上限的通知进每 agent 的内存队列（`pendingNotices`，`MAX_PENDING_NOTICES = 8`，`:210`），在 `agent/turn-stopping` 用 `agent.inject` 补发（`flushPendingNotices`，`:1178-1189`），`agent/disposed` 清空。`maxAutoInjectPerTurn <= 0` 视为完全静默、不入队。
+
+### Changed — 行为契约（升级必读）
+
+- **`text_only` / `structural` 不再做任何全篇格式化。** 需要三线表 / 正文两端对齐 / 公式居中，用 `mode: "format_normalization"` 或专门的 `writing_word_format_*` 工具。旧行为（每次编辑顺手格式化全篇）是 P1-2，已移除。
+- **覆盖已有文件总是建 `.bak`。** 新增返回字段 `backup_path`；输出到新文件时为 `null`。
+- **结果字段语义变严格。** `success` = 这次编辑整体可信（包有效 + 完整性 intact + 至少一条替换成功 + 无致命错误）；`complete` = 所有请求的替换都成功；`applied` / `failed` = 成功与失败的条数；`saved` = 是否真的落盘；`error` = 致命错误说明。全部替换失败时 `success=false` 但 `changes=0`、`saved=false`。
+- **范围边界必须成对。** 只给 `startParagraph`、只给 `startHeading` 等都会直接报错（`scope.error`），不再退化成全篇编辑。
+- **替换跨度覆盖受保护节点时拒绝而不是只警告。** 返回 `refused_reason: "protected_node_in_span"` / `"protected_node_paragraph"`，`preserved_nodes` 列出命中的节点。
+- **CLI 退出码：** 结果含 `error` → `2`；缺参数 → `1`；部分替换失败（有报告、无致命错误）→ `0`，由 JSON 里的 `success` / `complete` 表达。
+- **`FINGERPRINT_VERSION` 7 → 8**（`src/index.ts:251`）。P2-16 让假的 scholarship-lock 事件消失，P1-7 / P2-13 / P2-15 又改变了事件集合；不升版本的话，升级后第一轮会把旧指纹全部判成 `resolved`、新事件全部判成 `added`。升版本让状态文件整体重算一次。
+- **自动审计通知可能延后到回合结束。** 每轮超出 `maxAutoInjectPerTurn` 的通知不再丢失，改为排队到 `agent/turn-stopping` 补发（每 agent 最多 8 条）。
+
+### Why — 为什么这些必须修
+
+Word 编辑的失败模式是**不可逆的数据损坏**：删掉的图片和域不会自己回来，覆盖掉的原稿没有备份就是没了，而 2.3.0 的返回值在这些情况下仍然报成功。规则层的问题方向相反但后果一样严重——漏报让 `auditText` 在最该报警的场合保持沉默（整句删除、负号丢失、科学计数法改写），误报则让作者学会忽略警告（`p < 0.05` 只是少了个空格）。两类问题都会让「写前检查」这件事失去可信度，所以 2.4.0 把验收标准定为：**能复现的损坏必须被拒绝，能复现的漏报必须命中，误报必须消失**——20 项全部有回归断言。
+
+### Tests
+
+- `tests/run-tests.mjs` 2688 → 2985 行，新增第 101 节「v2.4.0 缺陷修复回归」，**新增 34 条**（33 条 TS/JS + 1 条 Python 汇总），总断言 **459 → 493**。
+- 新建 `tests/word_guard_tests.py`（749 行，**55 条 Python 断言**）：Word Guard 侧全部走**真实 CLI 子进程**（`sys.executable -B -m word_guard.cli`），覆盖 P1-1/P1-5/P1-6/P1-2/P1-3/P1-4/P2-9/P2-10/P2-11/P2-12 的每个症状；`tempfile.mkdtemp` 隔离、`finally` 清理；缺 `python-docx` 时输出 `{"skipped": true, ...}` 且 `exit 0`（CI 的 ubuntu 环境没有 python-docx，只能跳过不能失败）。
+- 解释器探测顺序：`DSH_PYTHON` → `$DSH_HOME/office/runtime/venv` → `python3` → `python`，逐个 `-c "import docx"` 探测。
+- 版本断言同步为 2.4.0。
+
+### 版本号同步点
+
+`package.json:3`、`PLUGIN_VERSION`（`src/rules.ts:53`）、`skills/writing-guard/manifest.yaml:2`、`tests/run-tests.mjs` 的 `profile.metadata.profileVersion` 断言。
+
 ## [2.3.0] - 2026-10-20
 
 ### Changed — GitHub URL 安装成为一等安装方式（fork）

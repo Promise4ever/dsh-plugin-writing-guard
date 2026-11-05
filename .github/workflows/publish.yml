@@ -1,8 +1,9 @@
 name: Publish to npm
 
+# 本 fork 不在 npm 上发布（README 的安装方式只有 GitHub URL / release ZIP / git checkout），
+# 因此这里只保留手动触发：推 v* tag 不会再自动跑发布流程、也不会因为没有 NPM_TOKEN 而报红。
+# 确实需要发布时，在 Actions 页手动 Run workflow，并先在仓库 Secrets 里配好 NPM_TOKEN。
 on:
-  push:
-    tags: ['v*']
   workflow_dispatch:
 
 concurrency:

@@ -1668,7 +1668,7 @@ console.log('=== 89. v1.4 Journal Profile 蒸馏（computeJournalProfile）===')
     'Our findings suggest that temperature is a key control. The observed increase may be related to enhanced vapor transport. Further studies should examine pore-scale salt precipitation.',
   ].join('\n')
   const profile = computeJournalProfile(corpus, { journal: 'Test Journal', articleType: 'research-article' })
-  check('journal profile metadata', profile.metadata.journal === 'Test Journal' && profile.metadata.profileVersion === '2.3.0' && profile.structure.sections.length >= 4)
+  check('journal profile metadata', profile.metadata.journal === 'Test Journal' && profile.metadata.profileVersion === '2.4.0' && profile.structure.sections.length >= 4)
   check('journal profile has sentence distribution', !!profile.sentenceStyle.sentenceLength && profile.sentenceStyle.sentenceLength.count > 0)
   check('journal profile has section details', profile.structure.sections.some((s) => s.name === 'results' && s.sentenceLength.count > 0))
   check('journal profile preserves only statistics', !JSON.stringify(profile).includes('This study investigates'))
@@ -2675,6 +2675,309 @@ const SAMPLE_SKILL = [
   check(
     'skill: bundled source resolves next to lib/',
     realSource.skillFile === path.resolve('/tmp/pkg', 'skills', 'writing-guard', 'SKILL.md'),
+  )
+}
+
+// === 101. v2.4.0 缺陷修复回归（P1-1 … P2-20）===
+console.log('=== 101. v2.4.0 缺陷修复回归（Python word_guard + TS 规则）===')
+{
+  const { spawnSync } = await import('node:child_process')
+  const { fileURLToPath } = await import('node:url')
+  const { auditDelivery } = await import('../lib/delivery.js')
+  const { planAutoAuditDelivery, enqueuePendingNotice, MAX_PENDING_NOTICES } = await import('../lib/index.js')
+  const { extractScholarshipEntities } = await import('../lib/rules.js')
+
+  // ---- Python 侧：tests/word_guard_tests.py（缺 python-docx 时必须 SKIP，不能让 CI 变红）----
+  const pyEnv = { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONDONTWRITEBYTECODE: '1' }
+  const moduleDir = path.dirname(fileURLToPath(import.meta.url))
+  const pyScriptCandidates = [
+    path.resolve(process.cwd(), 'tests', 'word_guard_tests.py'),
+    path.resolve(moduleDir, '..', '..', '..', 'tests', 'word_guard_tests.py'),
+    path.resolve(moduleDir, '..', 'word_guard_tests.py'),
+  ]
+  const pyScript = pyScriptCandidates.find((candidate) => fs.existsSync(candidate)) || null
+  // DSH 自带 office 运行时的解释器路径（本机可能有 python-docx；其他机器上不存在就跳过）
+  const dshHome = process.env.DSH_HOME?.trim() ||
+    path.join(process.env.USERPROFILE || process.env.HOME || '', '.dsh')
+  const officePython = process.platform === 'win32'
+    ? path.join(dshHome, 'office', 'runtime', 'venv', 'Scripts', 'python.exe')
+    : path.join(dshHome, 'office', 'runtime', 'venv', 'bin', 'python3')
+  const pyCandidates = [
+    process.env.DSH_PYTHON,
+    officePython,
+    'python3',
+    'python',
+  ].filter((candidate) => typeof candidate === 'string' && candidate.trim() !== '')
+  let pyExe = null
+  for (const candidate of pyCandidates) {
+    try {
+      const probe = spawnSync(candidate, ['-c', 'import docx'], { encoding: 'utf8', timeout: 30000, env: pyEnv })
+      if (probe && probe.status === 0) { pyExe = candidate; break }
+    } catch {
+      // 该解释器不可用，继续探测下一个
+    }
+  }
+
+  if (!pyScript) {
+    console.log('  ⚠️ word_guard python tests skipped: 未找到 tests/word_guard_tests.py')
+  } else if (!pyExe) {
+    console.log('  ⚠️ word_guard python tests skipped: 未找到带 python-docx 的解释器')
+  } else {
+    const pyRun = spawnSync(pyExe, ['-B', pyScript], {
+      encoding: 'utf8',
+      timeout: 240000,
+      env: pyEnv,
+      cwd: path.dirname(path.dirname(pyScript)),
+    })
+    const pyLines = String(pyRun.stdout || '').trim().split(/\r?\n/).filter((line) => line.trim() !== '')
+    let pySummary = null
+    for (let i = pyLines.length - 1; i >= 0; i -= 1) {
+      try {
+        const candidate = JSON.parse(pyLines[i])
+        if (candidate && typeof candidate === 'object' && 'passed' in candidate) { pySummary = candidate; break }
+      } catch {
+        // 不是 JSON 行，继续向上找
+      }
+    }
+    if (!pySummary) {
+      check(
+        'python: word_guard 回归脚本输出 JSON 汇总',
+        false,
+        `status=${pyRun.status} stderr=${String(pyRun.stderr || '').slice(0, 300)}`,
+      )
+    } else if (pySummary.skipped) {
+      console.log(`  ⚠️ word_guard python tests skipped: ${pySummary.reason || '依赖缺失'}`)
+    } else {
+      const pyFailures = Array.isArray(pySummary.failures) ? pySummary.failures : []
+      for (const item of pyFailures) check(`python: ${item.name}`, false, String(item.detail || ''))
+      check(
+        `python: word_guard 回归 ${pySummary.passed} 条断言全部通过`,
+        pyRun.status === 0 && (pySummary.failed || 0) === 0 && pyFailures.length === 0,
+        `status=${pyRun.status} failed=${pySummary.failed} failures=${pyFailures.length}`,
+      )
+    }
+  }
+
+  // ---- P1-7 整句删除不再掩盖 Null-Result / Negation 事件 ----
+  const epBefore = 'The treatment did not improve survival. The samples were stored safely.'
+  const epAfter = 'The samples were stored safely.'
+  const epDeleted = diffEpistemic(epBefore, epAfter)
+  check(
+    'P1-7 整句删除：nullResultRemoved 非空',
+    Array.isArray(epDeleted.nullResultRemoved) && epDeleted.nullResultRemoved.length === 1,
+    JSON.stringify(epDeleted.nullResultRemoved),
+  )
+  check(
+    'P1-7 整句删除事件带 sentenceDeleted + 原 marker',
+    epDeleted.nullResultRemoved.length === 1 &&
+      epDeleted.nullResultRemoved[0].sentenceDeleted === true &&
+      String(epDeleted.nullResultRemoved[0].marker).includes('did not improve'),
+    JSON.stringify(epDeleted.nullResultRemoved[0] || null),
+  )
+  check(
+    'P1-7 auditText integrity.negationDrift === 1',
+    auditText(epAfter, { original: epBefore }).integrity.negationDrift === 1,
+    JSON.stringify(auditText(epAfter, { original: epBefore }).integrity),
+  )
+  const epClean = diffEpistemic('The cat sat on the mat.', 'A feline rested upon the rug.')
+  const EP_EVENT_KEYS = [
+    'claimDrift', 'negationRemoved', 'negationAdded', 'nullResultRemoved', 'nullResultAdded',
+    'scopeRemoved', 'scopeAdded', 'evidenceStatusRemoved', 'evidenceStatusAdded', 'alignmentUncertain',
+  ]
+  check(
+    'P1-7 无受保护 marker 的整段重写仍为 0 事件（防误报）',
+    EP_EVENT_KEYS.every((key) => Array.isArray(epClean[key]) && epClean[key].length === 0),
+    JSON.stringify(epClean),
+  )
+
+  // ---- P1-8 Scholarship Lock：负号 / 科学计数法 / 范围 ----
+  const negShip = diffScholarship('The temperature was -5 K.', 'The temperature was 5 K.')
+  check(
+    'P1-8 -5 K → 5 K 被识别为数值变化',
+    negShip.changed.length === 1 && negShip.changed[0].before === '-5 K' && negShip.changed[0].after === '5 K',
+    JSON.stringify(negShip),
+  )
+  const expShip = diffScholarship('The dose was 5e-3 mg.', 'The dose was 8e-3 mg.')
+  check(
+    'P1-8 5e-3 mg → 8e-3 mg 被识别为数值变化',
+    expShip.changed.length === 1 && expShip.changed[0].before.includes('5e-3') && expShip.changed[0].after.includes('8e-3'),
+    JSON.stringify(expShip),
+  )
+  const rangeEntities = extractScholarshipEntities('The dose was 5-10 mg.')
+  check(
+    'P1-8 5-10 mg 不把 10 当成 -10',
+    rangeEntities.some((entity) => String(entity.value).includes('5-10 mg')) &&
+      rangeEntities.some((entity) => String(entity.value).trim() === '10 mg') &&
+      !rangeEntities.some((entity) => String(entity.value).trim().startsWith('-')),
+    JSON.stringify(rangeEntities),
+  )
+
+  // ---- P2-13 否定移除与零结果移除同时报告 ----
+  const bothDrift = diffEpistemic(
+    'The treatment did not improve survival. The response was not reversible.',
+    'The treatment improved survival. The response was reversible.',
+  )
+  check(
+    'P2-13 negationRemoved 与 nullResultRemoved 同时非空',
+    bothDrift.negationRemoved.length === 1 && bothDrift.nullResultRemoved.length === 1,
+    JSON.stringify({ negation: bothDrift.negationRemoved, nullResult: bothDrift.nullResultRemoved }),
+  )
+  check(
+    'P2-13 两类事件 marker 各自独立（not / did not improve）',
+    bothDrift.negationRemoved[0].marker === 'not' && bothDrift.nullResultRemoved[0].marker === 'did not improve',
+    JSON.stringify({ negation: bothDrift.negationRemoved[0], nullResult: bothDrift.nullResultRemoved[0] }),
+  )
+
+  // ---- P2-14 期刊档案：文献引用密度随 \cite 数量单调增 ----
+  const journalBodies = [
+    'We study the effect of treatment on outcome in this work.',
+    'We collected samples from participants and measured the primary outcome.',
+    'The treatment reduced the outcome compared with the control group.',
+    'These findings suggest that the treatment may be useful in practice.',
+  ]
+  const journalHeads = ['## Introduction', '## Methods', '## Results', '## Discussion']
+  const journalText = (citeCount) => {
+    let left = citeCount
+    return journalHeads
+      .map((head, index) => {
+        const take = Math.ceil(left / (journalHeads.length - index))
+        left -= take
+        const keys = Array.from({ length: take }, (_, offset) => `k${index * 10 + offset}`)
+        const cite = keys.length > 0 ? ` \\cite{${keys.join(',')}}` : ''
+        return `${head}\n${journalBodies[index]}${cite}`
+      })
+      .join('\n\n') + '\n'
+  }
+  const bibMedians = [0, 1, 2, 4, 8].map(
+    (count) => computeJournalProfile(journalText(count)).citations.bibliographicDensity.median,
+  )
+  check('P2-14 无文献引用时密度为 0', bibMedians[0] === 0, JSON.stringify(bibMedians))
+  check(
+    'P2-14 文献引用密度随 \\cite 数量单调增',
+    bibMedians.every((value, index) => index === 0 || value > bibMedians[index - 1]),
+    JSON.stringify(bibMedians),
+  )
+
+  // ---- P2-15 引用完整性：cite 族 / 注释 / eqref ----
+  const sampleBib = '@article{ok, author={Alpha, A.}, title={Some Title}, journal={J}, year={2020}, doi={10.1000/xyz}}'
+  const citeKinds = (text) => checkCitationIntegrity(text, sampleBib)
+  const citepHits = citeKinds('\\citep{missing}')
+  check(
+    'P2-15 \\citep 未解析引用被报告',
+    citepHits.length === 1 && citepHits[0].kind === 'unresolved-cite',
+    JSON.stringify(citepHits),
+  )
+  const citetHits = citeKinds('\\citet{missing}')
+  check(
+    'P2-15 \\citet 未解析引用被报告',
+    citetHits.length === 1 && citetHits[0].kind === 'unresolved-cite',
+    JSON.stringify(citetHits),
+  )
+  const citeStarHits = citeKinds('\\cite*{missing}')
+  check(
+    'P2-15 \\cite* 未解析引用被报告',
+    citeStarHits.length === 1 && citeStarHits[0].kind === 'unresolved-cite',
+    JSON.stringify(citeStarHits),
+  )
+  check('P2-15 注释中的 \\cite 不报告', citeKinds('% \\cite{ghost}\nText').length === 0)
+  const eqrefHits = citeKinds('\\eqref{missing}')
+  check(
+    'P2-15 \\eqref 缺 label 被报告',
+    eqrefHits.length === 1 && eqrefHits[0].kind === 'missing-label',
+    JSON.stringify(eqrefHits),
+  )
+  check('P2-15 合法 \\cite + bib 干净', citeKinds('\\cite{ok}').length === 0)
+
+  // ---- P2-16 格式归一化不产生假变化 ----
+  check(
+    'P2-16 p < 0.05 → p<0.05 不算变化',
+    diffScholarship('The value was p < 0.05.', 'The value was p<0.05.').changed.length === 0,
+  )
+  check('P2-16 5 mg → 5mg 不算变化', diffScholarship('The dose was 5 mg.', 'The dose was 5mg.').changed.length === 0)
+  const doseChange = diffScholarship('The dose was 5 mg.', 'The dose was 50 mg.')
+  check(
+    'P2-16 5 mg → 50 mg 仍报告数值变化',
+    doseChange.changed.length === 1 && doseChange.changed[0].before === '5 mg' && doseChange.changed[0].after === '50 mg',
+    JSON.stringify(doseChange),
+  )
+
+  // ---- P2-17 without 否定短语不误报 UNJUSTIFIED_NEGATIVE_REFERENCE ----
+  const withoutReport = auditDelivery({
+    text: 'The treatment works without causing harm.',
+    baseline: 'The treatment was evaluated.',
+    surface: 'release',
+  })
+  check('P2-17 without 短语不误报', withoutReport.findings.length === 0, JSON.stringify(withoutReport.findings))
+
+  // ---- P2-18 删除/替换动作的 baseline 真实性检查 ----
+  const ghostReport = auditDelivery({ text: 'Remove Cache. Remove Ghost.', baseline: 'Cache', surface: 'commit' })
+  check(
+    'P2-18 baseline 中不存在的删除对象被命中（Ghost）',
+    ghostReport.findings.some(
+      (finding) => finding.matchedTerm === 'Ghost' && finding.kind === 'UNJUSTIFIED_NEGATIVE_REFERENCE',
+    ),
+    JSON.stringify(ghostReport.findings),
+  )
+  const reduxReport = auditDelivery({
+    text: 'Replace Redux with signals.',
+    baseline: 'The old store was plain.',
+    surface: 'commit',
+  })
+  check(
+    'P2-18 祈使原形 Replace … with 被命中（Redux）',
+    reduxReport.findings.some((finding) => finding.matchedTerm === 'Redux'),
+    JSON.stringify(reduxReport.findings),
+  )
+  const legitReport = auditDelivery({
+    text: 'Replace Redux with signals.',
+    baseline: 'We used a Redux store before.',
+    surface: 'commit',
+  })
+  check('P2-18 baseline 中存在的对象视为真实删除（不报）', legitReport.findings.length === 0, JSON.stringify(legitReport.findings))
+  const noBaselineReport = auditDelivery({ text: 'Remove Cache.', surface: 'commit' })
+  check(
+    'P2-18 无 baseline → DELIVERY_CANDIDATE',
+    noBaselineReport.findings.length === 1 && noBaselineReport.findings[0].kind === 'DELIVERY_CANDIDATE',
+    JSON.stringify(noBaselineReport.findings),
+  )
+
+  // ---- P2-19 词形匹配：toast 不应被 toasted 掩盖 ----
+  const toastReport = auditDelivery({ text: 'Remove toast.', baseline: 'We toasted bread.', surface: 'commit' })
+  check(
+    'P2-19 Remove toast . baseline 只有 toasted 时仍命中',
+    toastReport.findings.some((finding) => finding.matchedTerm === 'toast'),
+    JSON.stringify(toastReport.findings),
+  )
+
+  // ---- P2-20 自动审计投递计划 ----
+  const pendingDiff = { added: ['f1'], resolved: [], remaining: 1 }
+  const injectPlan = planAutoAuditDelivery(0, 2, pendingDiff)
+  check(
+    'P2-20 未达上限且有新增 → inject',
+    injectPlan.action === 'inject' && injectPlan.nextCount === 1 && injectPlan.record === true,
+    JSON.stringify(injectPlan),
+  )
+  const enqueuePlan = planAutoAuditDelivery(2, 2, pendingDiff)
+  check(
+    'P2-20 已达上限 → enqueue',
+    enqueuePlan.action === 'enqueue' && enqueuePlan.nextCount === 2,
+    JSON.stringify(enqueuePlan),
+  )
+  const silentPlan = planAutoAuditDelivery(2, 0, pendingDiff)
+  check(
+    'P2-20 每轮上限为 0 → silent 且不记指纹',
+    silentPlan.action === 'silent' && silentPlan.record === false,
+    JSON.stringify(silentPlan),
+  )
+  const skipPlan = planAutoAuditDelivery(2, 2, { added: [], resolved: [], remaining: 0 })
+  check('P2-20 无新增 → skip', skipPlan.action === 'skip', JSON.stringify(skipPlan))
+  check('P2-20 enqueuePendingNotice 入队', JSON.stringify(enqueuePendingNotice([], 'n1')) === '["n1"]')
+  check('P2-20 MAX_PENDING_NOTICES === 8', MAX_PENDING_NOTICES === 8, String(MAX_PENDING_NOTICES))
+  const cappedQueue = enqueuePendingNotice(Array.from({ length: 8 }, (_, index) => `n${index}`), 'n8')
+  check(
+    'P2-20 超过上限丢最旧',
+    cappedQueue.length === 8 && cappedQueue[0] === 'n1' && cappedQueue[7] === 'n8',
+    JSON.stringify(cappedQueue),
   )
 }
 

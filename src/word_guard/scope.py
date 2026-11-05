@@ -27,6 +27,10 @@ class EditScope:
     ambiguous: bool = False
     ambiguity_options: list = field(default_factory=list)  # list[str]
     warnings: list = field(default_factory=list)
+    # Non-empty means the scope could not be resolved (incomplete / unparseable
+    # range parameters).  Callers must refuse the edit instead of using the
+    # default range fields.
+    error: Optional[str] = None
 
 
 def _normalize_heading(text):
@@ -123,6 +127,21 @@ def _find_heading(paragraphs, heading_text, level=None, allow_fuzzy=True):
     return matches
 
 
+def _scope_error(scope, message):
+    """Mark a scope as unresolvable and return it.
+
+    A half-specified or contradictory range must never silently degrade to
+    "the whole document": the caller has to see the error and refuse to write.
+    """
+    scope.start_para_index = 0
+    scope.end_para_index = -1
+    scope.included_paragraphs = []
+    scope.ambiguous = True
+    scope.error = message
+    scope.warnings.append(message)
+    return scope
+
+
 def resolve_scope(paragraphs, start_heading=None, end_heading=None,
                   heading=None, level=None, start_index=None, end_index=None,
                   allow_fuzzy=True):
@@ -145,14 +164,68 @@ def resolve_scope(paragraphs, start_heading=None, end_heading=None,
         allow_fuzzy: whether to use fuzzy heading matching
 
     Returns:
-        EditScope with resolved paragraph range
+        EditScope with resolved paragraph range. If the supplied parameters are
+        incomplete or unresolvable, ``scope.error`` is set and
+        ``included_paragraphs`` stays empty — callers must not edit anything.
     """
     scope = EditScope(start_para_index=0, end_para_index=len(paragraphs) - 1)
+    total_paragraphs = len(paragraphs)
+
+    # Empty heading strings mean "not supplied" (the tool schema may forward '').
+    start_heading = start_heading or None
+    end_heading = end_heading or None
+    heading = heading or None
+
+    # ── Mode 0: Validate the range parameters ──
+    # The tool schema lets callers supply any subset of anchors. A lone or
+    # contradictory boundary is a caller error, never an invitation to edit
+    # the whole document.
+    if heading is not None and (start_heading is not None or end_heading is not None):
+        return _scope_error(
+            scope,
+            "范围参数冲突：heading 不能与 start_heading/end_heading 同时使用",
+        )
+
+    if (start_heading is None) != (end_heading is None):
+        provided = 'start_heading' if start_heading is not None else 'end_heading'
+        missing = 'end_heading' if provided == 'start_heading' else 'start_heading'
+        return _scope_error(
+            scope,
+            f"范围边界不成对：只提供了 {provided}，缺少 {missing}"
+            "（章节范围必须同时给出起止标题）",
+        )
+
+    if (start_index is None) != (end_index is None):
+        provided = 'start_index' if start_index is not None else 'end_index'
+        missing = 'end_index' if provided == 'start_index' else 'start_index'
+        return _scope_error(
+            scope,
+            f"范围边界不成对：只提供了 {provided}，缺少 {missing}"
+            "（段落范围必须同时给出起止索引）",
+        )
+
+    if start_index is not None and end_index is not None:
+        if start_index < 0 or end_index < 0:
+            return _scope_error(
+                scope,
+                f"段落范围越界：start_index={start_index}, end_index={end_index}，索引不能为负",
+            )
+        if start_index >= total_paragraphs or end_index >= total_paragraphs:
+            return _scope_error(
+                scope,
+                f"段落范围越界：文档共 {total_paragraphs} 个段落，"
+                f"请求 start_index={start_index}, end_index={end_index}",
+            )
+        if start_index > end_index:
+            return _scope_error(
+                scope,
+                f"段落范围无效：start_index({start_index}) 大于 end_index({end_index})",
+            )
 
     # ── Mode 1: Explicit index range ──
     if start_index is not None and end_index is not None:
-        scope.start_para_index = max(0, start_index)
-        scope.end_para_index = min(len(paragraphs) - 1, end_index)
+        scope.start_para_index = start_index
+        scope.end_para_index = end_index
         scope.included_paragraphs = list(
             range(scope.start_para_index, scope.end_para_index + 1)
         )
@@ -164,25 +237,34 @@ def resolve_scope(paragraphs, start_heading=None, end_heading=None,
         end_matches = _find_heading(paragraphs, end_heading, level, allow_fuzzy)
 
         if not start_matches:
-            scope.warnings.append(f"Start heading not found: '{start_heading}'")
-            scope.ambiguous = True
-            return scope
+            return _scope_error(scope, f"未找到起始标题：'{start_heading}'")
         if not end_matches:
-            scope.warnings.append(f"End heading not found: '{end_heading}'")
-            scope.ambiguous = True
-            return scope
+            return _scope_error(scope, f"未找到结束标题：'{end_heading}'")
 
         if len(start_matches) > 1 and start_matches[0][1] < 0.9:
-            scope.ambiguous = True
             scope.ambiguity_options = [_get_para_text(m[2]) for m in start_matches[:5]]
-            scope.warnings.append(
-                f"Multiple matches for start heading '{start_heading}': "
-                f"{[_get_para_text(m[2]) for m in start_matches[:3]]}"
+            return _scope_error(
+                scope,
+                f"起始标题匹配存在歧义：'{start_heading}' 可能是 "
+                f"{[_get_para_text(m[2]) for m in start_matches[:3]]}",
             )
-            return scope
+        if len(end_matches) > 1 and end_matches[0][1] < 0.9:
+            scope.ambiguity_options = [_get_para_text(m[2]) for m in end_matches[:5]]
+            return _scope_error(
+                scope,
+                f"结束标题匹配存在歧义：'{end_heading}' 可能是 "
+                f"{[_get_para_text(m[2]) for m in end_matches[:3]]}",
+            )
 
         start_idx = start_matches[0][0]
         end_idx = end_matches[0][0]
+        if end_idx <= start_idx:
+            return _scope_error(
+                scope,
+                f"章节范围无效：结束标题 '{_get_para_text(end_matches[0][2])}' "
+                f"(段落 {end_idx}) 不在起始标题 "
+                f"'{_get_para_text(start_matches[0][2])}' (段落 {start_idx}) 之后",
+            )
 
         scope.start_para_index = start_idx
         scope.end_para_index = end_idx - 1  # exclusive
@@ -199,18 +281,15 @@ def resolve_scope(paragraphs, start_heading=None, end_heading=None,
         matches = _find_heading(paragraphs, heading, level, allow_fuzzy)
 
         if not matches:
-            scope.warnings.append(f"Heading not found: '{heading}'")
-            scope.ambiguous = True
-            return scope
+            return _scope_error(scope, f"未找到标题：'{heading}'")
 
         if len(matches) > 1 and matches[0][1] < 0.9:
-            scope.ambiguous = True
             scope.ambiguity_options = [_get_para_text(m[2]) for m in matches[:5]]
-            scope.warnings.append(
-                f"Multiple matches for heading '{heading}': "
-                f"{[_get_para_text(m[2]) for m in matches[:3]]}"
+            return _scope_error(
+                scope,
+                f"标题匹配存在歧义：'{heading}' 可能是 "
+                f"{[_get_para_text(m[2]) for m in matches[:3]]}",
             )
-            return scope
 
         target = matches[0]
         target_idx = target[0]

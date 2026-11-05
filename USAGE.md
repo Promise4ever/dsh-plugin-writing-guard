@@ -1,4 +1,4 @@
-# Writing Guard 使用说明（v2.3.0）
+# Writing Guard 使用说明（v2.4.0）
 
 面向「已经装好插件」的用户。插件随宿主启动自动加载，核心能力是**在你写论文类文件时自动做写作纪律审计**，外加 13 个可手动调用的审计/Word 工具。
 
@@ -63,7 +63,7 @@ dsh --profile <profile> "用 writing_audit 检查 D:/papers/manuscript.md"
 启用后（`autoAuditOnWrite`，默认 **开**），当你用 `write` / `edit` / `ops_write_file` / `ops_edit_file` / `ops_replace` 写入一个「论文类文件」时，插件会在工具返回结果后追加一段控制块：
 
 ```
-<writing_guard_control version="2.3.0" target="...\manuscript.md">
+<writing_guard_control version="2.4.0" target="...\manuscript.md">
 CONTROL METADATA ONLY. Do not quote, paraphrase, or transfer wording ...
 added=4; resolved=0; remaining=4
 
@@ -134,7 +134,7 @@ finding rule=we-do-not-claim; severity=high; kind=candidate; action=TIGHTEN; par
 | --- | --- | --- |
 | `writing_word_scan` | `filePath` | 结构化扫描：标题层级、段落、表格、公式/图片等受保护节点，安全编辑第一步 |
 | `writing_word_audit` | `filePath` | .docx 写作纪律检查（自动提取段落文本） |
-| `writing_word_edit` | `filePath`，`replacements[{old,new}]`，`scopeConfig`，`mode`，`outputPath` | run-aware 局部替换，保留粗体/斜体/字体/颜色 |
+| `writing_word_edit` | `filePath`，`replacements[{old,new}]`，`scopeConfig`，`mode`，`outputPath` | run-aware 局部替换，保留粗体/斜体/字体/颜色；默认只改文本，不做全篇格式化 |
 | `writing_word_scope_check` | `fileBefore`，`fileAfter`，`scopeConfig` | 验证编辑没动到范围外内容 |
 | `writing_word_format_tables` | `filePath`，`outputPath` | 全部表格转学术三线表（顶线 1.5pt / 表头底线 0.75pt / 底线 1.5pt） |
 | `writing_word_fingerprint` | `filePath` | 生成基准格式指纹（styles/settings/numbering 哈希、math font、section geometry） |
@@ -144,14 +144,36 @@ finding rule=we-do-not-claim; severity=high; kind=candidate; action=TIGHTEN; par
 Word 编辑推荐顺序：`scan` → `edit` → `scope_check` → `package_validate`。
 默认**不改**页边距、页眉页脚、section break、页码、图片、参考文献、交叉引用、书签、脚注。
 
-**两个必须知道的行为：**
+**必须知道的行为：**
 
-1. **`writing_word_edit` 会对整篇文档统一默认学术格式**，不管 `mode` 是 `text_only` 还是 `structural`，也不管 `scopeConfig` 限定在哪一段。
-   `scopeConfig` 只限制**文本替换**的范围，限制不了格式统一这一步。要求「只改文字、别碰格式」时，必须最后用
-   `writing_word_scope_check` / `writing_word_fingerprint` 比对，不能只靠 `scopeConfig`。
+1. **全篇默认学术格式只在 `mode: "format_normalization"` 下执行**（2.4.0 起）。
+   `text_only`（默认）和 `structural` 只做文本替换，不会改动任何未命中的段落对齐、表格样式或公式居中；
+   范围外的内容逐字节保持原样。要统一全篇格式就显式传 `mode: "format_normalization"`，
+   要「只改文字、别碰格式」用默认模式即可，再配合 `writing_word_scope_check` / `writing_word_fingerprint` 复核。
 2. **所有 Word 工具只吃 `.docx`**。`.doc`（旧版二进制）会被直接拒绝，先另存为 `.docx`。
    同理 `writing_word_scope_check` 的 `fileBefore` / `fileAfter` 也必须是 `.docx`——传 `.md` 会失败，
    要比较 Markdown 请用 `writing_audit` 的 `original` + `filePath`。
+3. **范围边界必须成对**。`startParagraph` 与 `endParagraph` 成对，或 `startHeading` 与 `endHeading` 成对；
+   只给一端、给了 `heading` 又给起止标题、`start > end`、索引越界、标题找不到，都属于参数错误：
+   工具直接返回 `success: false` + `error`，**不会**静默退化成「编辑全篇」。不传 `scopeConfig` 才是全篇。
+4. **编辑是先校验后落盘**。流程是「写临时文件 → 校验 OOXML 包 → 比对包部件 → 备份 → 原子替换」，
+   任何一步失败目标文件都逐字节不变（`saved: false`）。覆盖已有文件时生成 `.bak`（`backup_path` 指向它，
+   输出到新文件时为 `null`）。**校验失败时不会留下 `.bak`**，因为目标文件根本没被碰。
+
+`writing_word_edit` 的结果字段语义：
+
+| 字段 | 含义 |
+| --- | --- |
+| `success` | 这次编辑整体可信：包有效 + 完整性 intact + 至少一条替换成功 + 无致命错误 |
+| `complete` | 所有请求的替换都成功（`applied == total_replacements`） |
+| `applied` / `failed` | 成功 / 失败的替换条数 |
+| `saved` | 结果是否真的写进了目标文件 |
+| `backup_path` | `.bak` 路径；未覆盖已有文件时为 `null` |
+| `error` | 致命错误说明（范围参数错误、包校验失败、写入失败等）；非空时 CLI 以退出码 2 结束 |
+| `scope.error` | 范围解析错误（与 `error` 同源，便于定位是哪一端没配上） |
+
+单条替换被拒绝时不会破坏文档：`refused_reason` 会是 `protected_node_in_span`（命中跨度里有图片 / 域 / 公式 /
+超链接 / 原子文本节点）或 `not_found`，此时该条计为 `failed`，其余替换照常执行。
 
 ---
 
@@ -165,7 +187,7 @@ Word 编辑推荐顺序：`scan` → `edit` → `scope_check` → `package_valid
     mode: balanced            # conservative | balanced | strict → 映射 high | medium | low（仅在没显式设 autoAuditMinSeverity 时生效）
     autoAuditOnWrite: true    # 写入论文类文件后自动审计（默认 true）
     autoAuditMinSeverity: high   # 显式设置永远优先于 mode：两者同时写，以这里为准
-    maxAutoInjectPerTurn: 2   # 每轮最多注入几条通知（只限通知，状态照常跟踪）
+    maxAutoInjectPerTurn: 2   # 每轮最多注入几条通知；超出的排队到回合结束补发（0 = 完全静默）
     autoBrief: false          # 自动推纪律速查清单（默认关；机制见下）
     verboseByDefault: false   # 报告默认带修改建议
     projectResidueTerms:      # 追加的项目内部词表（命中按 medium 报）
@@ -196,7 +218,7 @@ Word 编辑推荐顺序：`scan` → `edit` → `scope_check` → `package_valid
 
 本 fork **没有发布 npm 包**；npm 上的 `dsh-plugin-writing-guard` 是上游原版，不含 rc.2 适配。
 
-**2.3.0 的主要安装方式：直接用 GitHub 仓库 URL 装。**
+**2.4.0 的主要安装方式：直接用 GitHub 仓库 URL 装。**
 
 ```bash
 # 推荐：插件扩展页 → 添加插件 → 输入下面这个地址
@@ -219,9 +241,9 @@ URL 跟的是仓库默认分支，需要钉版本时用下面的目录形态。
 
 离线、或需要钉版本时，用目录安装（`file:<绝对目录>`，目录里直接有 `package.json`）。两种拿目录的方式：
 
-1. 下载 release ZIP，解压到一个**固定**目录（v2.3.0 的 ZIP：
-   <https://github.com/Promise4ever/dsh-plugin-writing-guard/releases/tag/v2.3.0>）
-2. `git clone https://github.com/Promise4ever/dsh-plugin-writing-guard.git` → `git checkout v2.3.0`
+1. 下载 release ZIP，解压到一个**固定**目录（v2.4.0 的 ZIP：
+   <https://github.com/Promise4ever/dsh-plugin-writing-guard/archive/refs/tags/v2.4.0.zip>）
+2. `git clone https://github.com/Promise4ever/dsh-plugin-writing-guard.git` → `git checkout v2.4.0`
 
 ```bash
 dsh plugin --profile <profile> add "file:D:/path/to/dsh-plugin-writing-guard"

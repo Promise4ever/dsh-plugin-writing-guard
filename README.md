@@ -6,7 +6,7 @@
 > **这是 fork，不是上游原版。** 上游：[xmutfyh/dsh-plugin-writing-guard](https://github.com/xmutfyh/dsh-plugin-writing-guard)。
 > 上游的 CI 徽章、npm 包都属于上游仓库；npm 上的 `dsh-plugin-writing-guard` 是上游版本，**不是**这份适配版，本 fork 没有发布 npm 包。
 >
-> 本 fork 把上游 2.0.2 适配到 **DSH 0.2.1-rc.2**（版本号 2.3.0，tag `v2.3.0`），**只在 DSH 0.2.1-rc.2 上验证过**，不承诺其他版本。
+> 本 fork 把上游 2.0.2 适配到 **DSH 0.2.1-rc.2**（版本号 2.4.0，tag `v2.4.0`），**只在 DSH 0.2.1-rc.2 上验证过**，不承诺其他版本。
 > 相对上游的改动：宿主适配（rc.2 的 peer 范围、消息来源 kind、工具结果协议、Word Python 路径）、控制通知在 rc.2 上被静默丢弃的回归修复、skill 改为运行时自注册（安装期不再写 DSH_HOME）、文档与安装方式。
 > 判定规则、规则库与测试集沿用上游，署名见文末「致谢 / Credits」一节，许可见 [License](#license)。
 
@@ -32,7 +32,7 @@ dsh plugin --profile <profile> add https://github.com/Promise4ever/dsh-plugin-wr
 ```
 
 > 本 fork 未发布 npm 包，`npm install dsh-plugin-writing-guard` 装到的是上游原版。
-> **GitHub URL 是 2.3.0 的主要安装方式**；离线装目录（`file:<绝对目录>`）的两条备选路线见 [Installation](#installation)。
+> **GitHub URL 是 2.4.0 的主要安装方式**；离线装目录（`file:<绝对目录>`）的两条备选路线见 [Installation](#installation)。
 > 完整安装 / 升级 / 卸载步骤见 [INSTALL.md](INSTALL.md)，装完怎么用看 [USAGE.md](USAGE.md)。
 
 > Writing Guard does not write your paper for you.
@@ -117,7 +117,7 @@ Writing Guard 1.8 introduces a **document-integrity layer** for Word manuscripts
 ## Quick Start
 
 ```sh
-# 1) 直接以 GitHub URL 安装（2.3.0 的主要方式，不需要批准构建脚本）
+# 1) 直接以 GitHub URL 安装（2.4.0 的主要方式，不需要批准构建脚本）
 dsh plugin --profile <profile> add https://github.com/Promise4ever/dsh-plugin-writing-guard
 
 # 2) 重启宿主让 patch 层生效
@@ -125,7 +125,7 @@ dsh web
 ```
 
 离线或需要把版本钉死时，才取目录形态用 `file:` 安装（三步见 [Installation](#installation)）：
-git clone 后 checkout tag v2.3.0，或下载 release 的 ZIP 解压到固定目录。
+git clone 后 checkout tag v2.4.0，或下载 release 的 ZIP 解压到固定目录。
 
 ### Natural Language Usage
 
@@ -216,7 +216,7 @@ writing_word_scan → writing_word_edit → writing_word_scope_check
 本 fork **不发布 npm 包**。npm 上的 `dsh-plugin-writing-guard` 是上游原版（不含 rc.2 适配），
 `dsh plugin add dsh-plugin-writing-guard` 装到的也是上游原版。要装这份适配版，只能从本仓库的 GitHub URL、git tag 或 release 取。
 
-**v2.3.0 的主要安装方式：把本仓库的 GitHub URL 交给插件扩展页（或 CLI）。**
+**v2.4.0 的主要安装方式：把本仓库的 GitHub URL 交给插件扩展页（或 CLI）。**
 2.3.0 删掉了 `postinstall`，skill 改为插件运行时自注册，安装期不再往 `DSH_HOME` 写文件，
 因此这条路径不需要手改 `pnpm-workspace.yaml`、也不需要 `allowBuilds` 批准。
 
@@ -242,7 +242,7 @@ URL 形态跟的是仓库默认分支；需要把版本钉死时用下面的目�
 
 ### 方式 2：release ZIP 解压到固定目录（离线）
 
-从 [Releases](https://github.com/Promise4ever/dsh-plugin-writing-guard/releases/tag/v2.3.0) 下载 v2.3.0 的 ZIP，
+下载 [v2.4.0 的 ZIP](https://github.com/Promise4ever/dsh-plugin-writing-guard/archive/refs/tags/v2.4.0.zip)，
 解压到一个**固定的**目录（如 `D:/plugins/dsh-plugin-writing-guard`），然后按目录安装：
 
 ```sh
@@ -255,7 +255,7 @@ dsh web
 ```sh
 git clone https://github.com/Promise4ever/dsh-plugin-writing-guard.git
 cd dsh-plugin-writing-guard
-git checkout v2.3.0
+git checkout v2.4.0
 
 # 安装（Windows 路径示例）
 dsh plugin --profile <profile> add "file:D:/path/to/dsh-plugin-writing-guard"
@@ -362,16 +362,17 @@ The LLM/agent decides *what* should change. Deterministic Word code decides *how
 npm test
 ```
 
-测试集沿用上游并持续扩展，当前 **459 条确定性测试**（其中 27 条是 v2.3.0 新增的 skill 自注册回归）。**本 fork 没有配置 CI**，徽章里也不含 CI/npm 状态徽章；
+测试集沿用上游并持续扩展，当前 **493 条确定性测试**（27 条是 v2.3.0 新增的 skill 自注册回归，34 条是 v2.4.0 新增的缺陷修复回归，其中 55 条 Python 断言经 Node 汇总成 1 条）。**本 fork 没有配置 CI**，徽章里也不含 CI/npm 状态徽章；
 需要自己在本地跑，构建 + 测试的命令见 [CHANGELOG.md](CHANGELOG.md)。
 
-459 deterministic tests covering:
+493 deterministic tests covering:
 - STYLE, Scholarship Lock, Epistemic Lock
 - Claim alignment, local citation integrity
 - Journal Profile, Journal Fit
 - DELIVERY (CAL detection)
 - **Word Guard** (v1.8.2): OOXML validation, fingerprinting, equation audit
 - **Skill self-registration** (v2.3.0, 27 assertions): bundled provider, frontmatter parsing, legacy skill-copy detection
+- **v2.4.0 defect regressions** (34 assertions): Word Guard scope integrity, run-aware replacement, atomic save/backup, CLI exit codes, scholarship/epistemic locks, citation extraction, auto-audit notification queue
 
 ---
 
