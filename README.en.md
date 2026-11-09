@@ -7,8 +7,8 @@
 > The npm package named `dsh-plugin-writing-guard` is the **upstream** build, not this adapted fork —
 > this fork publishes no npm package and has no CI of its own.
 >
-> This fork adapts upstream 2.0.2 to **DSH 0.2.1-rc.2** (version 2.4.0, tag `v2.4.0`) and has been
-> **tested only on DSH 0.2.1-rc.2**; other versions are unverified. Changes vs upstream: host adaptation
+> This fork adapts upstream 2.0.2 to **DSH 0.2.1-rc.2 / 0.2.2-rc.1** (version 2.4.0, tag `v2.4.0`) and has
+> been **tested on DSH 0.2.1-rc.2 and 0.2.2-rc.1**; other versions are unverified. Changes vs upstream: host adaptation
 > (rc.2 peer ranges, message-source kind, tool-result protocol, Word Python paths), the regression fix for
 > control notices being silently dropped on rc.2, runtime skill self-registration (no install-time writes to
 > `DSH_HOME`) with the GitHub URL as the primary install route, and corrected docs/install instructions.
@@ -286,8 +286,12 @@ it works after install and is gone from the plugin list after a restart.
 
 ### Prerequisites
 
-- **DSH 0.2.1-rc.2** (peers: `@deepseek-ai/dsh-tools` / `@deepseek-ai/dsh-llm` `^0.2.1-rc.2`,
-  `@deepseek-ai/cordis` `^4.0.1`). This fork is verified **only** on 0.2.1-rc.2.
+- **DSH 0.2.1-rc.2 / 0.2.2-rc.1** (peers: `@deepseek-ai/dsh-tools` / `@deepseek-ai/dsh-llm` `^0.2.1-rc.2`,
+  `@deepseek-ai/cordis` `^4.0.1`). This fork is verified on 0.2.1-rc.2 and 0.2.2-rc.1. The host matches peer
+  ranges with semver `includePrerelease`, so `^0.2.1-rc.2` is accepted on 0.2.2-rc.1. Verified there: 0 tsc
+  errors, 493 deterministic tests passing, all 13 tools registered and callable, post-write auto-audit notices
+  delivered through `decision.additionalContexts`, runtime skill self-registration resolving to the packaged
+  `skills/writing-guard`, and atomic `state.json` persistence (fingerprint/baseline increment and clear paths).
 - Node.js ≥ 22.19.0 (DSH 0.2.1 runtime requirement).
 - Python 3.10+ with `python-docx` (`pip install python-docx`) for **every DOCX operation** — the eight
   `writing_word_*` tools *and* `writing_audit` called on a `.docx`. The plugin **does not install it**;
@@ -369,7 +373,7 @@ Full changelog and implementation details are in [CHANGELOG.md](CHANGELOG.md).
 ## Credits
 
 This repository is a fork of [xmutfyh/dsh-plugin-writing-guard](https://github.com/xmutfyh/dsh-plugin-writing-guard).
-The rule corpus, tool design and test suite come from upstream; this fork only adapts them to DSH 0.2.1-rc.2,
+The rule corpus, tool design and test suite come from upstream; this fork only adapts them to DSH 0.2.1-rc.2 / 0.2.2-rc.1,
 fixes one control-notice regression, and corrects the docs/install instructions.
 Upstream bugs belong upstream; fork-specific issues go to
 [this repository's issues](https://github.com/Promise4ever/dsh-plugin-writing-guard/issues).

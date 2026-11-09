@@ -6,7 +6,7 @@
 > **这是 fork，不是上游原版。** 上游：[xmutfyh/dsh-plugin-writing-guard](https://github.com/xmutfyh/dsh-plugin-writing-guard)。
 > 上游的 CI 徽章、npm 包都属于上游仓库；npm 上的 `dsh-plugin-writing-guard` 是上游版本，**不是**这份适配版，本 fork 没有发布 npm 包。
 >
-> 本 fork 把上游 2.0.2 适配到 **DSH 0.2.1-rc.2**（版本号 2.4.0，tag `v2.4.0`），**只在 DSH 0.2.1-rc.2 上验证过**，不承诺其他版本。
+> 本 fork 把上游 2.0.2 适配到 **DSH 0.2.1-rc.2 / 0.2.2-rc.1**（版本号 2.4.0，tag `v2.4.0`），**已在 DSH 0.2.1-rc.2 与 0.2.2-rc.1 上验证过**，其他版本未验证。
 > 相对上游的改动：宿主适配（rc.2 的 peer 范围、消息来源 kind、工具结果协议、Word Python 路径）、控制通知在 rc.2 上被静默丢弃的回归修复、skill 改为运行时自注册（安装期不再写 DSH_HOME）、文档与安装方式。
 > 判定规则、规则库与测试集沿用上游，署名见文末「致谢 / Credits」一节，许可见 [License](#license)。
 
@@ -312,8 +312,12 @@ allowBuilds:
 
 ### Prerequisites
 
-- **DSH 0.2.1-rc.2**（peer: `@deepseek-ai/dsh-tools` / `@deepseek-ai/dsh-llm` `^0.2.1-rc.2`、`@deepseek-ai/cordis` `^4.0.1`）。
-  本 fork **只在 0.2.1-rc.2 上验证过**，其他版本未验证。
+- **DSH 0.2.1-rc.2 / 0.2.2-rc.1**（peer: `@deepseek-ai/dsh-tools` / `@deepseek-ai/dsh-llm` `^0.2.1-rc.2`、`@deepseek-ai/cordis` `^4.0.1`）。
+  宿主兼容性判定按 semver `includePrerelease` 匹配 peer 范围，所以 `^0.2.1-rc.2` 在 0.2.2-rc.1 上被判为兼容。
+  0.2.2-rc.1 实测结论：`tsc --noEmit` 0 error、493 条确定性测试通过、13 个工具注册且可调用、
+  写后自动审计通知经 `decision.additionalContexts` 送达、skill 运行时自注册解析到包内 `skills/writing-guard`、
+  `state.json` 原子落盘（fingerprint / baseline 增量与清零路径）正常。
+  本 fork 已在 0.2.1-rc.2 与 0.2.2-rc.1 上验证过，其他版本未验证。
 - Node.js ≥ 22.19.0（DSH 0.2.1 运行时要求）。
 - Python 3.10+ 且装了 `python-docx`（`pip install python-docx`）：所有 DOCX 相关操作都需要，
   包括 8 个 `writing_word_*` 工具**以及**对 `.docx` 调用 `writing_audit`。插件**不会**替你安装它；
@@ -432,7 +436,7 @@ See [CHANGELOG.md](CHANGELOG.md).
 ## 致谢 / Credits
 
 本仓库是 [xmutfyh/dsh-plugin-writing-guard](https://github.com/xmutfyh/dsh-plugin-writing-guard) 的 fork。
-规则库、工具设计与测试集均来自上游；本 fork 只做 DSH 0.2.1-rc.2 适配、一处控制通知回归修复，以及文档/安装方式的修订。
+规则库、工具设计与测试集均来自上游；本 fork 只做 DSH 0.2.1-rc.2 / 0.2.2-rc.1 适配、一处控制通知回归修复，以及文档/安装方式的修订。
 上游问题请反馈给上游仓库；本 fork 引入的问题请提到 [本仓库 Issues](https://github.com/Promise4ever/dsh-plugin-writing-guard/issues)。
 
 ## License

@@ -32,8 +32,9 @@ dsh plugin --profile <profile> add https://github.com/Promise4ever/dsh-plugin-wr
 
 ## 1. 环境要求
 
-- **DSH 0.2.1-rc.2**。peer 范围：`@deepseek-ai/dsh-tools` / `@deepseek-ai/dsh-llm` `^0.2.1-rc.2`、
-  `@deepseek-ai/cordis` `^4.0.1`。本 fork **只在 0.2.1-rc.2 上验证过**，其他 DSH 版本未验证。
+- **DSH 0.2.1-rc.2 / 0.2.2-rc.1**。peer 范围：`@deepseek-ai/dsh-tools` / `@deepseek-ai/dsh-llm` `^0.2.1-rc.2`、
+  `@deepseek-ai/cordis` `^4.0.1`。本 fork 已在 0.2.1-rc.2 与 0.2.2-rc.1 上验证过，其他 DSH 版本未验证。
+  宿主兼容性判定按 semver `includePrerelease` 匹配 peer 范围，`^0.2.1-rc.2` 在 0.2.2-rc.1 上被判为兼容。
 - **Node.js ≥ 22.19.0**（DSH 0.2.1 运行时要求）。
 - **Python 3.10+ 与 `python-docx`**：只有 Word / DOCX 相关功能需要（`pip install python-docx`）。
   插件**不会替你装**；2.3.0 删掉 `postinstall` 后也没有安装期探测了，缺它时相关工具在调用时报错并提示安装。
@@ -175,7 +176,7 @@ dsh plugin --profile <profile> remove dsh-plugin-writing-guard
   （判据是 `is_dir()`，tgz 是文件，恒为 false），表现为「装完能用，重启后插件列表里没了」。
   受影响的只是**本地 `file:*.tgz` 装在这类 Desktop 构建上**；目录形态（`file:<目录>`）不受影响；
   从 registry / HTTPS tarball 安装、纯 CLI profile 的情况**没有被证实**存在这个问题，不要一概而论。
-- **只在 DSH 0.2.1-rc.2 上验证过**，peer 范围见第 1 节，其他版本不承诺。
+- **只在 DSH 0.2.1-rc.2 与 0.2.2-rc.1 上验证过**，peer 范围见第 1 节，其他版本不承诺。
 - **不发布 npm 包**：npm 上的同名包是上游原版。
 - **`python-docx` 不代装**，也没有安装期探测（2.3.0 删除了 `postinstall`），Word 工具缺依赖时在调用报错。
 - **装完必须重启宿主**：没有 hmr 时宿主会给 restart-required 提示。

@@ -2,13 +2,14 @@
 
 This repository is a fork of
 [xmutfyh/dsh-plugin-writing-guard](https://github.com/xmutfyh/dsh-plugin-writing-guard).
-The fork adapts upstream 2.0.2 to **DSH 0.2.1-rc.2**, released here as **2.3.0**; it has been tested
-**only** on DSH 0.2.1-rc.2.
+The fork adapts upstream 2.0.2 to **DSH 0.2.1-rc.2 / 0.2.2-rc.1**, released here as **2.4.0**; it has
+been tested on DSH 0.2.1-rc.2 and 0.2.2-rc.1.
 
 ## Supported versions
 
 | Version | Supported |
 |---|---|
+| 2.4.x (this fork) | ✅ — DSH 0.2.1-rc.2 and 0.2.2-rc.1 |
 | 2.3.x (this fork) | ✅ — only on DSH 0.2.1-rc.2 |
 | 2.2.x (this fork) | ⚠️ upgrade to 2.3.x — 2.2.0's `postinstall` left a skill copy in `$DSH_HOME/skills/` |
 | 2.0.x (upstream) | upstream only — see the upstream repository |

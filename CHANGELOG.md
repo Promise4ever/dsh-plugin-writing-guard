@@ -10,6 +10,22 @@ aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > [xmutfyh/dsh-plugin-writing-guard](https://github.com/xmutfyh/dsh-plugin-writing-guard)，
 > 由本 fork 原样继承；本 fork 新增的条目会在标题里标注「fork」。
 
+## [Unreleased]
+
+### Compatibility (fork)
+
+- **DSH 0.2.2-rc.1 适配验证（2026-11-10）**：在 DSH 0.2.2-rc.1 宿主上完整复验，未发现需要修改代码的兼容性问题。
+  - `tsc --noEmit` 对 0.2.2-rc.1 的 `dsh-tools` / `dsh-llm` / `cordis` 类型 0 error；
+  - 493 条确定性测试全部通过；
+  - 宿主加载插件并注册 13 个 `writing_*` 工具，`writing_audit` 实际调用成功；
+  - `tools/post-execute` 的 `decision.additionalContexts` 注入路径实测生效：写后自动审计的
+    `<writing_guard_control version="2.4.0">` 会进入模型上下文；
+  - skill 运行时自注册在 0.2.2-rc.1 上实测解析到包内 `skills/writing-guard`；
+  - `state.json` 原子落盘、fingerprint / baseline 的增量与清零路径均正常。
+- 0.2.2-rc.1 的兼容性判定沿用 semver `includePrerelease`（`@deepseek-ai/dsh-app-boot` 的
+  `evaluatePluginCompatibility`），因此 `peerDependencies` 的 `^0.2.1-rc.2` 覆盖 `0.2.2-rc.1`，无需版本豁免。
+- 文档：README / INSTALL / SECURITY 的已验证范围更新为「0.2.1-rc.2 与 0.2.2-rc.1」。
+
 ## [2.4.0] - 2026-11-05
 
 > 2.4.0 是**缺陷修复版本**：修掉 2.3.0 全量代码审查中复现的 20 个问题（8 个 P1、12 个 P2），没有新增功能。
